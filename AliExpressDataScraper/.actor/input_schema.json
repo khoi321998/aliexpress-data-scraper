@@ -1,0 +1,56 @@
+{
+    "$schema": "https://apify.com/schemas/v1/input.ide.json",
+    "title": "AliExpress Data Scraper",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {
+        "startUrls": {
+            "title": "Start URLs",
+            "type": "array",
+            "description": "AliExpress product detail page URLs to scrape.",
+            "editor": "requestListSources",
+            "prefill": [
+                {
+                    "url": "https://www.aliexpress.com/item/3256805894825145.html"
+                }
+            ]
+        },
+        "maxRequestsPerCrawl": {
+            "title": "Max Requests per Crawl",
+            "type": "integer",
+            "description": "Maximum number of pages to scrape (0 = unlimited).",
+            "default": 10,
+            "minimum": 0
+        },
+        "maxConcurrency": {
+            "title": "Max Concurrency",
+            "type": "integer",
+            "description": "How many product pages to scrape in parallel. Keep this low (1-3) for browser + residential-proxy crawls so you stay under AliExpress's rate radar.",
+            "default": 2,
+            "minimum": 1,
+            "maximum": 10
+        },
+        "maxRequestRetries": {
+            "title": "Max Request Retries",
+            "type": "integer",
+            "description": "How many times a blocked request is retried. Each retry rotates to a fresh session (new residential IP + fingerprint), so give rotation room to find a clean IP.",
+            "default": 5,
+            "minimum": 0,
+            "maximum": 15
+        },
+        "proxyCountry": {
+            "title": "Proxy Country",
+            "type": "string",
+            "description": "Two-letter country code for the Apify residential proxy (matches the en-US fingerprint by default).",
+            "default": "US",
+            "editor": "textfield"
+        },
+        "headless": {
+            "title": "Headless Browser",
+            "type": "boolean",
+            "description": "Run Chrome in headless (new) mode. Disable to run headful via Xvfb, which is harder to detect but uses more resources.",
+            "default": true
+        }
+    },
+    "required": ["startUrls"]
+}
