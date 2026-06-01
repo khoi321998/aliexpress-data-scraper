@@ -165,5 +165,10 @@ Actor.on('aborting', async () => {
 
 await crawler.run(requestUrls);
 
+// Surface the total number of retries across the whole run. 0 means every URL succeeded on the
+// first attempt (no rotation needed) — a quick health signal for how aggressively AliExpress is
+// blocking us.
+log.info(`Total retried: ${crawler.stats.state.requestsRetries}`);
+
 // It's recommended to quit every Actor with an explicit exit().
 await Actor.exit();
