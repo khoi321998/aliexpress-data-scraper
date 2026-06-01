@@ -23,7 +23,7 @@ apify push
 ## Anti-bot strategy
 
 AliExpress serves anti-bot challenges (a reCAPTCHA v2 modal, an Alibaba slider
-puzzle, or a "punish" redirect). Rather than *solving* these — the Alibaba slider
+puzzle, or a "punish" redirect). Rather than _solving_ these — the Alibaba slider
 in particular is solver-resistant — the Actor focuses on **avoidance and rotation**:
 
 - **Avoidance:** each request runs real Chrome with a consistent, generated
@@ -85,7 +85,6 @@ This code is a TypeScript script that uses Cheerio to scrape data from a website
 ## Creating Actors with templates
 
 [How to create Apify Actors with web scraping code templates](https://www.youtube.com/watch?v=u-i-Korzf8w)
-
 
 ## Getting started
 

@@ -60,12 +60,7 @@ describe('detection', () => {
 
     // A minimal fake Page: classifyPage only touches url(), locator().count(), title(), and
     // evaluate(). We stub just those to exercise the classification priority without a browser.
-    function fakePage(opts: {
-        url: string;
-        selectorHits?: string[];
-        title?: string;
-        bodyLen?: number;
-    }): Page {
+    function fakePage(opts: { url: string; selectorHits?: string[]; title?: string; bodyLen?: number }): Page {
         const hits = new Set(opts.selectorHits ?? []);
         return {
             url: () => opts.url,

@@ -44,7 +44,10 @@ export const TITLE_SELECTORS = [
 /** Return true if any of the given selectors matches at least one element. */
 async function anySelectorPresent(page: Page, selectors: string[]): Promise<boolean> {
     for (const selector of selectors) {
-        const count = await page.locator(selector).count().catch(() => 0);
+        const count = await page
+            .locator(selector)
+            .count()
+            .catch(() => 0);
         if (count > 0) {
             return true;
         }
@@ -64,9 +67,7 @@ export function isPunishPage(page: Page): boolean {
 
 /** True when a reCAPTCHA or slider challenge is present in the DOM. */
 export async function isCaptchaPage(page: Page): Promise<boolean> {
-    return (
-        (await anySelectorPresent(page, RECAPTCHA_SELECTORS)) || (await anySelectorPresent(page, SLIDER_SELECTORS))
-    );
+    return (await anySelectorPresent(page, RECAPTCHA_SELECTORS)) || (await anySelectorPresent(page, SLIDER_SELECTORS));
 }
 
 /** True when the page is a Cloudflare challenge / generic access-denied block. */

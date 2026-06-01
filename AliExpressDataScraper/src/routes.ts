@@ -1,12 +1,13 @@
-import { createPlaywrightRouter } from '@crawlee/playwright';
 import type { PlaywrightCrawlingContext } from '@crawlee/playwright';
+import { createPlaywrightRouter } from '@crawlee/playwright';
 import type { Log } from 'apify';
 import type { Page } from 'playwright';
 
 import type { ScraperConfig } from './config.js';
-import { TITLE_SELECTORS, classifyPage, isProductLoaded } from './detection.js';
+import { classifyPage, isProductLoaded, TITLE_SELECTORS } from './detection.js';
 import { simulateBrowsing } from './humanize.js';
 import { createAliExpressResponse } from './response.js';
+import { logBrowserIdentity } from './stealth.js';
 
 /** Try each candidate selector; return the first non-empty title text found. */
 async function readTitle(page: Page): Promise<string | null> {
@@ -71,12 +72,14 @@ export function createRouter(config: ScraperConfig) {
 
     router.addDefaultHandler(async (ctx) => {
         const { request, page, log, pushData, session } = ctx;
-        const startedAt = Date.now();
+
+        // 0. Log the fingerprint this session is actually presenting (ground truth from the
+        //    page). Lets you confirm each rotation really did mint a new IP + identity.
+        await logBrowserIdentity(page, log, session?.id);
 
         // 1. Classify the page we landed on. Captcha/punish/blocked all mean this session is
         //    "burned" — we never solve, we rotate to a fresh IP + fingerprint and retry.
         let status = await classifyPage(page);
-        log.info('Page classified.', { url: page.url(), status, sessionId: session?.id });
 
         if (status === 'captcha' || status === 'punish' || status === 'blocked') {
             rotateAndRetry(ctx, status);
@@ -114,12 +117,7 @@ export function createRouter(config: ScraperConfig) {
         // TODO: populate the remaining DTO fields (pricing, media, specifications, reviews, …).
 
         await pushData(response);
-        log.info('Product extracted.', {
-            url: page.url(),
-            title: response.product.title,
-            sessionId: session?.id,
-            elapsedMs: Date.now() - startedAt,
-        });
+        log.info('extracted successfully');
     });
 
     return router;

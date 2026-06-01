@@ -1,14 +1,15 @@
 // Crawlee - web scraping and browser automation library (Read more at https://crawlee.dev)
+import { setTimeout as sleep } from 'node:timers/promises';
+
 import { PlaywrightCrawler } from '@crawlee/playwright';
 // Apify SDK - toolkit for building Apify Actors (Read more at https://docs.apify.com/sdk/js/)
 import { Actor, log } from 'apify';
-import { setTimeout as sleep } from 'node:timers/promises';
 
+import type { ScraperInput } from './config.js';
 // this is an ESM project, so relative imports must include the `.js` extension even from TS.
 import { buildConfig } from './config.js';
-import type { ScraperInput } from './config.js';
 import { createRouter } from './routes.js';
-import { CHROME_LAUNCH_ARGS, FINGERPRINT_OPTIONS, applyStealthInitScript } from './stealth.js';
+import { applyRegionOverrides, applyStealthInitScript, CHROME_LAUNCH_ARGS, FINGERPRINT_OPTIONS } from './stealth.js';
 import { normalizeAliExpressUrl } from './url.js';
 
 // Load a local `.env` (e.g. TWOCAPTCHA_API_KEY) for local runs. On the Apify platform these
@@ -24,6 +25,7 @@ await Actor.init();
 
 const input = (await Actor.getInput<ScraperInput>()) ?? ({} as ScraperInput);
 const config = buildConfig(input);
+log.info('Resolved scraper config.', { ...config });
 
 if (!input.startUrls?.length) {
     throw new Error('Input "startUrls" must contain at least one AliExpress product URL.');
@@ -126,8 +128,12 @@ const crawler = new PlaywrightCrawler({
             // event rarely fires, causing needless navigation timeouts. We wait for real
             // product selectors in the handler instead.
             if (gotoOptions) {
+                // eslint-disable-next-line no-param-reassign -- mutating gotoOptions is the documented Crawlee way to set navigation options.
                 gotoOptions.waitUntil = 'domcontentloaded';
             }
+            // Force US timezone/locale (CDP) so they match the en-US fingerprint + US proxy,
+            // then layer the extra stealth patches. Both run before navigation.
+            await applyRegionOverrides(page);
             await applyStealthInitScript(page);
         },
     ],
