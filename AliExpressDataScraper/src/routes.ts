@@ -4,8 +4,17 @@ import type { Log } from 'apify';
 import type { Page } from 'playwright';
 
 import type { ScraperConfig } from './config.js';
+import { extractCondition } from './condition.js';
+import { extractDescription } from './description.js';
 import { classifyPage, isProductLoaded, TITLE_SELECTORS } from './detection.js';
 import { simulateBrowsing } from './humanize.js';
+import { extractMedia } from './media.js';
+import { extractPricing } from './pricing.js';
+import { extractReviews } from './reviews.js';
+import { extractSellerRef } from './seller.js';
+import { extractShipping } from './shipping.js';
+import { extractSpecifications } from './specifications.js';
+import { extractStock } from './stock.js';
 import { createAliExpressResponse } from './response.js';
 import { logBrowserIdentity } from './stealth.js';
 
@@ -114,7 +123,66 @@ export function createRouter(config: ScraperConfig) {
 
         response.product.title = title as string;
 
-        // TODO: populate the remaining DTO fields (pricing, media, specifications, reviews, …).
+        // Media — images + videos from the PDP gallery.
+        response.product.media = await extractMedia(page);
+        log.info('media extracted', {
+            images: response.product.media.images.length,
+            videos: response.product.media.videos.length,
+        });
+
+        // Pricing — headline price + currency from the PDP price block.
+        response.product.pricing = await extractPricing(page);
+        log.info('pricing extracted', {
+            currency: response.product.pricing.currency,
+            price: response.product.pricing.price,
+        });
+
+        // Specifications — name/value table (expanded via "View more").
+        response.product.specifications = await extractSpecifications(page, log);
+        log.info('specifications extracted', { count: response.product.specifications.length });
+
+        // Description — rich-text detail block (Description tab → "View more" → read content).
+        response.product.description = await extractDescription(page, log);
+        log.info('description extracted', {
+            htmlLength: response.product.description.html.length,
+            plainTextLength: response.product.description.plainText.length,
+        });
+
+        // Buy box & service panel (right column) — stock, shipping, return/service commitments,
+        // and the seller reference. All best-effort; absent fields stay at their defaults.
+        response.product.stock = await extractStock(page);
+        log.info('stock extracted', { availableQuantity: response.product.stock.availableQuantity });
+
+        response.product.shipping = await extractShipping(page);
+        log.info('shipping extracted', {
+            options: response.product.shipping.options.length,
+            deliveryTimeText: response.product.shipping.deliveryTimeText,
+        });
+
+        response.product.condition = await extractCondition(page);
+        log.info('condition extracted', {
+            returnPolicySummary: response.product.condition.returnPolicySummary,
+            guaranteeLabels: response.product.condition.guaranteeLabels.length,
+        });
+
+        response.sellerRef = await extractSellerRef(page);
+        if (response.sellerRef) {
+            // We now carry seller identity alongside the product, so reflect that in the mode.
+            response.captureMode = 'product_and_seller';
+            log.info('seller extracted', {
+                name: response.sellerRef.name,
+                platformSellerId: response.sellerRef.platformSellerId,
+            });
+        }
+
+        // Reviews — ratings summary + sample reviews (Customer Reviews tab → "View more" → modal).
+        // Done last because it opens a modal overlay that would obstruct the other extractions.
+        response.product.reviewsSummary = await extractReviews(page, log);
+        log.info('reviews extracted', {
+            rating: response.product.reviewsSummary.rating,
+            reviewCount: response.product.reviewsSummary.reviewCount,
+            samples: response.product.reviewsSummary.reviewSamples.length,
+        });
 
         await pushData(response);
         log.info('extracted successfully');

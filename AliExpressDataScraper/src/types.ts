@@ -10,8 +10,6 @@ export type Platform = 'ebay' | 'aliexpress' | string;
 
 export type CaptureMode = 'product_only' | 'product_and_seller' | string;
 
-export type RatingType = 'positive' | 'negative' | 'neutral';
-
 /** Top-level scrape envelope returned for a single URL. */
 export interface ProductSellerResponse {
     platform: Platform;
@@ -120,9 +118,6 @@ export interface Media {
 
 export interface ProductImage {
     url: string;
-    /** Stable key extracted from the image URL, used to de-duplicate variants. */
-    variantKey: string | null;
-    isMain: boolean;
 }
 
 export interface ProductVideo {
@@ -135,8 +130,8 @@ export interface ReviewsSummary {
     reviewCount: number | null;
     /** Count of reviews per star value, keyed "1".."5". */
     ratingBreakdown: RatingBreakdown;
-    negativeReviewSamples: ReviewSample[];
-    positiveReviewSamples: ReviewSample[];
+    /** Sample reviews as shown on the page, each carrying its own star `rating`. */
+    reviewSamples: ReviewSample[];
     authenticityKeywords: string[];
     buyerMediaCounts: BuyerMediaCounts;
 }
@@ -155,8 +150,13 @@ export interface ReviewSample {
     comment: string;
     /** Free-text recency label as shown on the page, e.g. "Past 6 months". */
     commentDate: string;
-    ratingType: RatingType;
+    /** Star rating of this individual review (1–5), when shown. The only sentiment signal AliExpress exposes. */
+    rating: number | null;
     verifiedPurchase: boolean;
+    /** The variant the reviewer bought, e.g. "Color:Rice white Nylon". */
+    sku: string | null;
+    /** Buyer-uploaded photo URLs attached to this review. */
+    images: string[];
 }
 
 export interface BuyerMediaCounts {

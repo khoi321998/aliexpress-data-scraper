@@ -105,7 +105,7 @@ const crawler = new PlaywrightCrawler({
         // far less suspicious than bundled Chromium).
         useChrome: true,
         launchOptions: {
-            headless: true,
+            headless: false,
             args: CHROME_LAUNCH_ARGS,
         },
     },
