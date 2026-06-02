@@ -73,8 +73,9 @@ export function buildConfig(input: ScraperInput): ScraperConfig {
         maxConcurrency,
         maxRequestRetries: asPositiveInt(input.maxRequestRetries, 5),
         navigationTimeoutSecs: 45,
-        // Comfortably covers navigation + hydration wait + humanization + extraction.
-        requestHandlerTimeoutSecs: 90,
+        // Comfortably covers navigation + hydration wait + humanization + extraction, including the
+        // per-star review dropdown sweep (each level waits for its AJAX list reload to settle).
+        requestHandlerTimeoutSecs: 180,
         headless: input.headless ?? true,
         proxyCountry: (input.proxyCountry ?? 'US').toUpperCase(),
         sessionPool: {
