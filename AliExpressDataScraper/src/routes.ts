@@ -13,7 +13,14 @@ import { extractPricing } from './pricing.js';
 import { createAliExpressResponse } from './response.js';
 import { extractReviews } from './reviews.js';
 import { extractSellerRef } from './seller.js';
-import { fetchSellerInfo } from './sellerApi.js';
+import {
+    fetchProductEvaluation,
+    fetchSellerInfo,
+    fetchSellerProducts,
+    parseSellerInfo,
+    parseSellerProducts,
+    primeMtopToken,
+} from './sellerApi.js';
 import { extractShipping } from './shipping.js';
 import { extractSpecifications } from './specifications.js';
 import { logBrowserIdentity } from './stealth.js';
@@ -116,6 +123,12 @@ export function createRouter(config: ScraperConfig) {
             rotateAndRetry(ctx, status);
         }
 
+        // 4b. Proactively mint the MTOP `_m_h5_tk` token now, while the page is warm and settled.
+        //     It sets the cookie via a throwaway call so the seller API call later (after all the
+        //     product extraction) reads a ready token and succeeds on its first attempt instead of
+        //     paying the token-bootstrap dance at that point. Best-effort.
+        await primeMtopToken(page, log);
+
         // 5. Extract. Start from the canonical DTO skeleton and fill what we find.
         const response = createAliExpressResponse(request.url);
         const title = await readTitle(page);
@@ -196,6 +209,51 @@ export function createRouter(config: ScraperConfig) {
                         sellerId,
                         response: JSON.stringify(apiRes),
                     });
+
+                    // SPIKE: try the product-evaluation (reviews) API and log the full response.
+                    const evalRes = await fetchProductEvaluation(page, sellerId, log);
+                    log.info('EVALUATION API full response', {
+                        sellerId,
+                        response: JSON.stringify(evalRes),
+                    });
+
+                    // Parse the useful fields out of the raw response and log them.
+                    const parsed = parseSellerInfo(apiRes);
+                    log.info('SELLER parsed', { sellerId, ...parsed });
+                    if (parsed) {
+                        // Promote the seller from a bare reference to a full profile on the response.
+                        response.seller = {
+                            ...response.sellerRef,
+                            positiveFeedbackPercent: parsed.positiveFeedbackPercent,
+                            feedbackScore: parsed.totalCount,
+                            storeNum: parsed.storeNum,
+                            countryCode: parsed.countryCode,
+                            followersText: parsed.followersText,
+                            openedSinceText: parsed.openedSinceText,
+                            storeLogo: parsed.storeLogo,
+                            reviewCounts: {
+                                positive: parsed.positiveCount,
+                                neutral: parsed.neutralCount,
+                                negative: parsed.negativeCount,
+                                total: parsed.totalCount,
+                            },
+                            scores: parsed.scores,
+                        };
+
+                        // With the store number in hand (from seller.page.info), fetch the seller's
+                        // store products and keep the first 10 as previews.
+                        if (parsed.storeNum) {
+                            const productsRes = await fetchSellerProducts(page, sellerId, parsed.storeNum, log);
+                            log.info('SELLER products full response', {
+                                sellerId,
+                                storeNum: parsed.storeNum,
+                                response: JSON.stringify(productsRes),
+                            });
+                            const products = parseSellerProducts(productsRes, 10);
+                            log.info('SELLER products parsed', { sellerId, storeNum: parsed.storeNum, count: products.length });
+                            response.seller.productPreviews = products;
+                        }
+                    }
                 } catch (error) {
                     log.warning('Seller API call failed — skipping seller (product unaffected).', {
                         error: error instanceof Error ? error.message : String(error),
