@@ -24,8 +24,21 @@ export const ANTIBOT_URL_MARKERS = ['/punish', '_____tmd_____', 'x5secdata'];
 // reCAPTCHA v2 widget present on the page.
 export const RECAPTCHA_SELECTORS = ['iframe[src*="recaptcha"]', '.g-recaptcha[data-sitekey]', '#g-recaptcha-response'];
 
-// Alibaba's slider puzzle ("nc" / nocaptcha) challenge.
-export const SLIDER_SELECTORS = ['.nc-container', '#nc_1_n1z', '.btn_slide', 'iframe[src*="x5sec"]'];
+// Alibaba's slider puzzle challenge. It ships under several skins — the legacy "nc" / nocaptcha
+// widget and the newer "baxia" punish dialog — and the challenge iframe can come from x5sec OR a
+// generic punish URL. We match all of them so a store-page challenge is recognized regardless of
+// which variant Alibaba serves.
+export const SLIDER_SELECTORS = [
+    '.nc-container',
+    '#nc_1_n1z',
+    '.btn_slide',
+    '.nc_wrapper',
+    '#baxia-dialog-content',
+    '.baxia-dialog',
+    '[class*="baxia"]',
+    'iframe[src*="x5sec"]',
+    'iframe[src*="punish"]',
+];
 
 // Cloudflare interstitial / managed-challenge markers.
 const CLOUDFLARE_SELECTORS = ['#cf-challenge-running', '#challenge-form', 'iframe[src*="challenges.cloudflare.com"]'];
@@ -68,6 +81,31 @@ export function isPunishPage(page: Page): boolean {
 /** True when a reCAPTCHA or slider challenge is present in the DOM. */
 export async function isCaptchaPage(page: Page): Promise<boolean> {
     return (await anySelectorPresent(page, RECAPTCHA_SELECTORS)) || (await anySelectorPresent(page, SLIDER_SELECTORS));
+}
+
+/**
+ * Classify WHY a non-product page (store / feedback) is blocked, or `null` if it isn't.
+ *
+ * A store page has no product title to check, so we look only for anti-bot markers — but unlike
+ * {@link isCaptchaPage} we report the granular cause (punish redirect / reCAPTCHA / Alibaba slider /
+ * Cloudflare-or-access-denied) so the seller reload loop can log exactly what it hit. Order mirrors
+ * {@link classifyPage}: URL punish first, then the two captcha families, then generic blocks.
+ */
+export async function sellerBlockReason(page: Page): Promise<string | null> {
+    if (isPunishPage(page)) {
+        return `Alibaba punish redirect (URL: ${page.url()})`;
+    }
+    if (await anySelectorPresent(page, RECAPTCHA_SELECTORS)) {
+        return 'reCAPTCHA widget present';
+    }
+    if (await anySelectorPresent(page, SLIDER_SELECTORS)) {
+        return 'Alibaba slider / nocaptcha / baxia challenge present';
+    }
+    if (await isBlockedPage(page)) {
+        const title = (await page.title().catch(() => '')) || '<no title>';
+        return `Cloudflare / access-denied block (title: "${title}")`;
+    }
+    return null;
 }
 
 /** True when the page is a Cloudflare challenge / generic access-denied block. */

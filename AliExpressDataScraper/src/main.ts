@@ -54,13 +54,12 @@ if (!requestUrls.length) {
     throw new Error('No valid AliExpress product URLs found in "startUrls".');
 }
 
-// AliExpress blocks datacenter IPs hard, so we always route through Apify residential proxy.
-// `checkAccess` validates proxy credentials up front so we fail fast with a clear error instead
-// of silently getting blocked mid-crawl.
+// AliExpress blocks datacenter IPs hard, so we route through Apify residential proxy. `checkAccess`
+// is intentionally omitted so a local run (where proxy access can't be verified up front) doesn't
+// throw — it just egresses from the local IP if the proxy is unavailable.
 const proxyConfiguration = await Actor.createProxyConfiguration({
     groups: ['RESIDENTIAL'],
     countryCode: config.proxyCountry,
-    checkAccess: true,
 });
 log.info(`Using Apify residential proxy (RESIDENTIAL, country ${config.proxyCountry}).`);
 

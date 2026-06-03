@@ -12,12 +12,12 @@ import type { Page } from 'playwright';
 
 import type { SellerRef } from './types.js';
 
-const STORE_LINK_SELECTOR = '[class*="store-detail--wrap"]';
+export const STORE_LINK_SELECTOR = '[class*="store-detail--wrap"]';
 const STORE_NAME_SELECTOR = '[class*="store-detail--storeName"]';
 const MESSAGE_LINK_SELECTOR = '[class*="businessInfoWrap"] a[href*="sellerSeq"]';
 
 /** Promote a protocol-relative URL (`//host/…`) to https; pass everything else through. */
-function ensureAbsolute(url: string): string {
+export function ensureAbsolute(url: string): string {
     return url.startsWith('//') ? `https:${url}` : url;
 }
 
@@ -31,6 +31,32 @@ export function parseStoreId(url: string): string | null {
 export function parseSellerSeq(url: string): string | null {
     const match = url.match(/[?&]sellerSeq=(\d+)/i);
     return match ? match[1] : null;
+}
+
+// The positive-feedback headline reads e.g. "94.5% positive reviews". Class names are hashed,
+// so we anchor on the literal label text and read the percentage that precedes it.
+const POSITIVE_FEEDBACK_RE = /(\d+(?:\.\d+)?)\s*%\s*positive\s*reviews/i;
+
+/**
+ * Extract the store's positive-feedback percentage from the feedback page header, or null.
+ *
+ * Tries the scoped element around the "positive reviews" label first (most precise), then falls
+ * back to a whole-body text match so a layout shuffle still yields the number.
+ */
+export async function extractPositiveFeedbackPercent(page: Page): Promise<number | null> {
+    const scopedText = await page
+        .getByText('positive reviews', { exact: false })
+        .first()
+        .evaluate((el) => (el.closest('a, p, div') ?? el).textContent ?? '')
+        .catch(() => '');
+    const scoped = scopedText.match(POSITIVE_FEEDBACK_RE);
+    if (scoped) {
+        return Number(scoped[1]);
+    }
+
+    const body = await page.evaluate(() => document.body?.innerText ?? '').catch(() => '');
+    const fromBody = body.match(POSITIVE_FEEDBACK_RE);
+    return fromBody ? Number(fromBody[1]) : null;
 }
 
 /** Collapse whitespace and trim; treats null/undefined as empty. */
