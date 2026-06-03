@@ -83,31 +83,6 @@ export async function isCaptchaPage(page: Page): Promise<boolean> {
     return (await anySelectorPresent(page, RECAPTCHA_SELECTORS)) || (await anySelectorPresent(page, SLIDER_SELECTORS));
 }
 
-/**
- * Classify WHY a non-product page (store / feedback) is blocked, or `null` if it isn't.
- *
- * A store page has no product title to check, so we look only for anti-bot markers — but unlike
- * {@link isCaptchaPage} we report the granular cause (punish redirect / reCAPTCHA / Alibaba slider /
- * Cloudflare-or-access-denied) so the seller reload loop can log exactly what it hit. Order mirrors
- * {@link classifyPage}: URL punish first, then the two captcha families, then generic blocks.
- */
-export async function sellerBlockReason(page: Page): Promise<string | null> {
-    if (isPunishPage(page)) {
-        return `Alibaba punish redirect (URL: ${page.url()})`;
-    }
-    if (await anySelectorPresent(page, RECAPTCHA_SELECTORS)) {
-        return 'reCAPTCHA widget present';
-    }
-    if (await anySelectorPresent(page, SLIDER_SELECTORS)) {
-        return 'Alibaba slider / nocaptcha / baxia challenge present';
-    }
-    if (await isBlockedPage(page)) {
-        const title = (await page.title().catch(() => '')) || '<no title>';
-        return `Cloudflare / access-denied block (title: "${title}")`;
-    }
-    return null;
-}
-
 /** True when the page is a Cloudflare challenge / generic access-denied block. */
 export async function isBlockedPage(page: Page): Promise<boolean> {
     if (await anySelectorPresent(page, CLOUDFLARE_SELECTORS)) {

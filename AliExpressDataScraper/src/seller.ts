@@ -33,32 +33,6 @@ export function parseSellerSeq(url: string): string | null {
     return match ? match[1] : null;
 }
 
-// The positive-feedback headline reads e.g. "94.5% positive reviews". Class names are hashed,
-// so we anchor on the literal label text and read the percentage that precedes it.
-const POSITIVE_FEEDBACK_RE = /(\d+(?:\.\d+)?)\s*%\s*positive\s*reviews/i;
-
-/**
- * Extract the store's positive-feedback percentage from the feedback page header, or null.
- *
- * Tries the scoped element around the "positive reviews" label first (most precise), then falls
- * back to a whole-body text match so a layout shuffle still yields the number.
- */
-export async function extractPositiveFeedbackPercent(page: Page): Promise<number | null> {
-    const scopedText = await page
-        .getByText('positive reviews', { exact: false })
-        .first()
-        .evaluate((el) => (el.closest('a, p, div') ?? el).textContent ?? '')
-        .catch(() => '');
-    const scoped = scopedText.match(POSITIVE_FEEDBACK_RE);
-    if (scoped) {
-        return Number(scoped[1]);
-    }
-
-    const body = await page.evaluate(() => document.body?.innerText ?? '').catch(() => '');
-    const fromBody = body.match(POSITIVE_FEEDBACK_RE);
-    return fromBody ? Number(fromBody[1]) : null;
-}
-
 /** Collapse whitespace and trim; treats null/undefined as empty. */
 function clean(value: string | null | undefined): string {
     return (value ?? '').replace(/\s+/g, ' ').trim();
