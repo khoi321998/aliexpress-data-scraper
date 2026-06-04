@@ -21,20 +21,19 @@ import type { Page } from 'playwright';
 
 const ACS_BASE = 'https://acs.aliexpress.com/h5';
 const SELLER_INFO_API = 'mtop.ae.shop.seller.page.info';
-const PRODUCT_GROUP_API = 'mtop.ae.shop.search.product.group';
-const EVALUATION_API = 'evaluation.productEvaluation';
-const EVALUATION_VERSION = '102'; // This API is versioned 102, not 1.0.
+// Seller feedback + reviews. The AliExpress endpoint name is `evaluation.productEvaluation`, but
+// keyed by seller id it returns the seller's feedback/reviews — not per-product evaluations.
+const SELLER_REVIEWS_API = 'evaluation.productEvaluation';
+const SELLER_REVIEWS_VERSION = '102'; // This API is versioned 102, not 1.0.
 const CALLBACK = 'mtopjsonp_ae_seller';
 const MAX_ATTEMPTS = 3; // The token dance needs at most 2; allow a spare for transient errors.
 
-// appKey is PER-API. The lenient "info" endpoints tolerate the current key, but the risk-controlled
-// search endpoint (search.product.group) flags a wrong/foreign appKey and responds with an RGV587
-// anti-bot challenge — so it MUST use a real AliExpress key (24815441).
+// appKey is PER-API. The lenient "info" endpoint tolerates the current key; the evaluation endpoint
+// is risk-controlled and needs a real AliExpress key (24815441), which is also the default.
 const DEFAULT_APP_KEY = '24815441';
 const APP_KEY_BY_API: Record<string, string> = {
     [SELLER_INFO_API]: '12574478',
-    [PRODUCT_GROUP_API]: '24815441',
-    [EVALUATION_API]: '24815441',
+    [SELLER_REVIEWS_API]: '24815441',
 };
 
 /** The appKey to sign/send for a given API (falls back to the default AliExpress key). */
@@ -133,17 +132,6 @@ async function callMtop(
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
         const token = await readToken(page);
         const req = buildRequest(api, version, data, token);
-        log.info('MTOP request', {
-            api,
-            attempt,
-            hasToken: Boolean(token),
-            appKey: req.appKey,
-            token: req.token,
-            t: req.t,
-            sign: req.sign,
-            data,
-            url: req.url,
-        });
 
         let res: unknown;
         try {
@@ -168,14 +156,6 @@ async function callMtop(
     }
 
     return null;
-}
-
-/** Read a single cookie value by name from the session (e.g. `cna`, used as `cookieId`). Searches
- *  ALL cookies in the context so it finds the value regardless of which `.aliexpress.com` host/path
- *  it was set on. */
-async function readCookie(page: Page, name: string): Promise<string> {
-    const cookies = await page.context().cookies().catch(() => []);
-    return cookies.find((c) => c.name === name)?.value ?? '';
 }
 
 /**
@@ -319,10 +299,11 @@ export async function fetchSellerInfo(
 }
 
 /**
- * Fetch a page of the seller's product evaluations / reviews (`evaluation.productEvaluation`, v102).
- * Keyed by `sellerAdminSeq` (= the seller id). Returns the raw MTOP response, or `null` on failure.
+ * Fetch a page of the seller's feedback + reviews (`evaluation.productEvaluation`, v102). Despite the
+ * endpoint name, keyed by `sellerAdminSeq` (= the seller id) it returns the SELLER's feedback/reviews,
+ * not per-product evaluations. Returns the raw MTOP response, or `null` on failure.
  */
-export async function fetchProductEvaluation(
+export async function fetchSellerReviews(
     page: Page,
     sellerAdminSeq: string | number,
     log: Log,
@@ -340,7 +321,7 @@ export async function fetchProductEvaluation(
     } = opts;
     return callMtop(
         page,
-        EVALUATION_API,
+        SELLER_REVIEWS_API,
         {
             page: pageNum,
             pageSize,
@@ -355,110 +336,6 @@ export async function fetchProductEvaluation(
             platform: 'web',
         },
         log,
-        EVALUATION_VERSION,
+        SELLER_REVIEWS_VERSION,
     );
-}
-
-/** A lightweight preview of one of a seller's products, parsed from `search.product.group`. */
-export interface SellerProductPreview {
-    productId: string;
-    title: string | null;
-    url: string | null;
-    imageUrl: string | null;
-    /** Current (promotion) price as a number, plus the original price and currency. */
-    price: number | null;
-    originalPrice: number | null;
-    currency: string | null;
-    /** Pre-formatted price string as shown on the page, e.g. "₫ 28,686". */
-    priceText: string | null;
-    rating: number | null;
-    reviewCount: number | null;
-    orders: number | null;
-    /** Free-text sales label, e.g. "1,000+". */
-    salesText: string | null;
-}
-
-/**
- * Fetch a page of the seller's store products (`search.product.group`). Needs the seller id and the
- * store number (`storeNum` from {@link fetchSellerInfo}); `cookieId` (the `cna` cookie) is optional
- * tracking context. Returns the raw MTOP response, or `null` on failure.
- */
-export async function fetchSellerProducts(
-    page: Page,
-    sellerId: string | number,
-    storeNumber: string | number,
-    log: Log,
-    opts: SellerApiOptions & { pageSize?: number; cookieId?: string } = {},
-): Promise<unknown | null> {
-    const { locale = 'en_US', currency = 'USD', lang = 'en', country = 'US', pageSize = 40 } = opts;
-    const cookieId = opts.cookieId ?? (await readCookie(page, 'cna'));
-    return callMtop(
-        page,
-        PRODUCT_GROUP_API,
-        {
-            locale,
-            country,
-            currency,
-            lang,
-            buyerId: 0,
-            currentPage: 1,
-            productGroupId: '',
-            pageSize,
-            sellerId: Number(sellerId),
-            site: 'glo',
-            storeNumber: Number(storeNumber),
-            platform: 'pc',
-            sortType: 'bestmatch_sort',
-            filterType: '',
-            searchText: '',
-            cookieId,
-        },
-        log,
-    );
-}
-
-/** Promote a protocol-relative URL (`//host/…`) to https; pass other strings through, null stays null. */
-function toHttps(url: string | null): string | null {
-    if (!url) {
-        return null;
-    }
-    return url.startsWith('//') ? `https:${url}` : url;
-}
-
-/**
- * Parse up to `limit` product previews out of a raw `search.product.group` response. Returns an
- * empty array if the shape isn't recognized.
- */
-export function parseSellerProducts(res: unknown, limit = 10): SellerProductPreview[] {
-    const items = asRecord(asRecord(res).data).data;
-    if (!Array.isArray(items)) {
-        return [];
-    }
-    return items.slice(0, limit).map((raw) => {
-        const p = asRecord(raw);
-        const prices = asRecord(p.prices);
-        const promo = asRecord(prices.promotionPiecePrice);
-        const piece = asRecord(prices.piecePrice);
-        const evaluate = asRecord(p.evaluateInfo);
-        const id = p.id != null ? String(p.id) : '';
-        return {
-            productId: id,
-            title: typeof p.subject === 'string' ? p.subject : typeof p.seoTitle === 'string' ? p.seoTitle : null,
-            url: toHttps(typeof p.pcDetailUrl === 'string' ? p.pcDetailUrl : null),
-            imageUrl:
-                typeof p.image350Url === 'string'
-                    ? p.image350Url
-                    : typeof p.scaleImageUrl === 'string'
-                      ? p.scaleImageUrl
-                      : null,
-            price: toNumber(promo.amount) ?? toNumber(piece.amount),
-            originalPrice: toNumber(piece.amount),
-            currency: typeof piece.currencyCode === 'string' ? piece.currencyCode : null,
-            priceText: typeof p.formatedPromotionPiecePriceStr === 'string' ? p.formatedPromotionPiecePriceStr : null,
-            rating: toNumber(p.averageStar) ?? toNumber(evaluate.starRating),
-            reviewCount: toNumber(p.feedbacks),
-            orders: toNumber(p.orders),
-            salesText: typeof p.sales === 'string' ? p.sales : null,
-        };
-    });
 }

@@ -13,17 +13,9 @@ import { extractPricing } from './pricing.js';
 import { createAliExpressResponse } from './response.js';
 import { extractReviews } from './reviews.js';
 import { extractSellerRef } from './seller.js';
-import {
-    fetchProductEvaluation,
-    fetchSellerInfo,
-    fetchSellerProducts,
-    parseSellerInfo,
-    parseSellerProducts,
-    primeMtopToken,
-} from './sellerApi.js';
+import { fetchSellerInfo, fetchSellerReviews, parseSellerInfo, primeMtopToken } from './sellerApi.js';
 import { extractShipping } from './shipping.js';
 import { extractSpecifications } from './specifications.js';
-import { logBrowserIdentity } from './stealth.js';
 import { extractStock } from './stock.js';
 
 /** Try each candidate selector; return the first non-empty title text found. */
@@ -92,11 +84,7 @@ export function createRouter(config: ScraperConfig) {
     const scrapedSellerIds = new Set<string>();
 
     router.addDefaultHandler(async (ctx) => {
-        const { request, page, log, pushData, session } = ctx;
-
-        // 0. Log the fingerprint this session is actually presenting (ground truth from the
-        //    page). Lets you confirm each rotation really did mint a new IP + identity.
-        await logBrowserIdentity(page, log, session?.id);
+        const { request, page, log, pushData } = ctx;
 
         // 1. Classify the page we landed on. Captcha/punish/blocked all mean this session is
         //    "burned" — we never solve, we rotate to a fresh IP + fingerprint and retry.
@@ -205,21 +193,13 @@ export function createRouter(config: ScraperConfig) {
                 scrapedSellerIds.add(sellerId);
                 try {
                     const apiRes = await fetchSellerInfo(page, sellerId, log);
-                    log.info('SELLER API full response', {
-                        sellerId,
-                        response: JSON.stringify(apiRes),
-                    });
-
-                    // SPIKE: try the product-evaluation (reviews) API and log the full response.
-                    const evalRes = await fetchProductEvaluation(page, sellerId, log);
-                    log.info('EVALUATION API full response', {
-                        sellerId,
-                        response: JSON.stringify(evalRes),
-                    });
-
-                    // Parse the useful fields out of the raw response and log them.
+                    const reviewsRes = await fetchSellerReviews(page, sellerId, log);
                     const parsed = parseSellerInfo(apiRes);
-                    log.info('SELLER parsed', { sellerId, ...parsed });
+                    log.info('seller API fetched', {
+                        sellerId,
+                        info: Boolean(parsed),
+                        reviews: Boolean(reviewsRes),
+                    });
                     if (parsed) {
                         // Promote the seller from a bare reference to a full profile on the response.
                         response.seller = {
@@ -238,21 +218,10 @@ export function createRouter(config: ScraperConfig) {
                                 total: parsed.totalCount,
                             },
                             scores: parsed.scores,
+                            // DEBUG: raw seller feedback/reviews response saved so we can inspect its
+                            // full shape in the dataset before writing the review parser.
+                            rawReviews: reviewsRes,
                         };
-
-                        // With the store number in hand (from seller.page.info), fetch the seller's
-                        // store products and keep the first 10 as previews.
-                        if (parsed.storeNum) {
-                            const productsRes = await fetchSellerProducts(page, sellerId, parsed.storeNum, log);
-                            log.info('SELLER products full response', {
-                                sellerId,
-                                storeNum: parsed.storeNum,
-                                response: JSON.stringify(productsRes),
-                            });
-                            const products = parseSellerProducts(productsRes, 10);
-                            log.info('SELLER products parsed', { sellerId, storeNum: parsed.storeNum, count: products.length });
-                            response.seller.productPreviews = products;
-                        }
                     }
                 } catch (error) {
                     log.warning('Seller API call failed — skipping seller (product unaffected).', {

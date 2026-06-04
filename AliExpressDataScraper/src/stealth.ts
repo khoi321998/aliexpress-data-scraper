@@ -8,7 +8,6 @@
 // easier to detect than no spoofing at all, so we lean on the injector and only add a thin
 // belt-and-suspenders init script for the few globals it does not touch.
 import type { FingerprintGeneratorOptions } from '@crawlee/browser-pool';
-import type { Log } from 'apify';
 import type { Page } from 'playwright';
 
 /**
@@ -163,14 +162,3 @@ export async function readPublicIp(page: Page): Promise<string | null> {
     }
 }
 
-/** Best-effort log of the per-session proxy IP + fingerprint; never throws. */
-export async function logBrowserIdentity(page: Page, log: Log, sessionId?: string): Promise<void> {
-    const [identity, proxyIp] = await Promise.all([readBrowserIdentity(page), readPublicIp(page)]);
-    if (identity) {
-        log.info('Session identity in use (proxy IP + fingerprint as the page reports it).', {
-            sessionId,
-            proxyIp,
-            ...identity,
-        });
-    }
-}
