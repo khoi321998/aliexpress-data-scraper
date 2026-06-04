@@ -171,6 +171,24 @@ export interface SellerRef {
     url: string | null;
 }
 
+/** A lightweight preview of one of the seller's other products, scraped from the PDP's
+ *  "Recommended from <store>" strip (`pcDetailBottomMoreThisSeller`). */
+export interface SellerProductPreview {
+    productId: string | null;
+    title: string | null;
+    url: string | null;
+    imageUrl: string | null;
+    /** Current price as a number, plus the exact string shown on the card. */
+    price: number | null;
+    priceText: string | null;
+    originalPrice: number | null;
+    originalPriceText: string | null;
+    /** Discount magnitude as a positive percentage (e.g. 50 for "-50%"). */
+    discountPercent: number | null;
+    soldCount: number | null;
+    soldText: string | null;
+}
+
 /** Full seller profile. Shape extends as more seller fields are scraped. */
 export interface Seller {
     platformSellerId: string | null;
@@ -178,6 +196,8 @@ export interface Seller {
     url: string | null;
     positiveFeedbackPercent: number | null;
     feedbackScore: number | null;
+    /** Other products by this seller, scraped from the PDP recommendation strip. */
+    productPreviews?: SellerProductPreview[];
     [key: string]: unknown;
 }
 

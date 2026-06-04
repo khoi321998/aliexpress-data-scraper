@@ -13,6 +13,7 @@ import { extractPricing } from './pricing.js';
 import { createAliExpressResponse } from './response.js';
 import { extractReviews } from './reviews.js';
 import { extractSellerRef } from './seller.js';
+import { extractSellerProductPreviews } from './sellerProducts.js';
 import { fetchSellerInfo, fetchSellerReviews, parseSellerInfo, primeMtopToken } from './sellerApi.js';
 import { extractShipping } from './shipping.js';
 import { extractSpecifications } from './specifications.js';
@@ -228,6 +229,16 @@ export function createRouter(config: ScraperConfig) {
                         error: error instanceof Error ? error.message : String(error),
                     });
                 }
+            }
+
+            // Product previews come from the PDP DOM ("Recommended from <store>" strip), so they're
+            // read on every product page — independent of the (de-duped) seller API call above. Attach
+            // them to the seller profile, building a minimal one from the ref if the API yielded none.
+            const productPreviews = await extractSellerProductPreviews(page, log);
+            if (productPreviews.length) {
+                response.seller = response.seller
+                    ? { ...response.seller, productPreviews }
+                    : { ...response.sellerRef, positiveFeedbackPercent: null, feedbackScore: null, productPreviews };
             }
         }
 
