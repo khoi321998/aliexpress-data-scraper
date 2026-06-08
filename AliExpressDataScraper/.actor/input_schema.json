@@ -7,7 +7,7 @@
         "mode": {
             "title": "Scrape Mode",
             "type": "string",
-            "description": "What to capture. \"Product + Seller (full)\": full product details plus the seller profile, store reviews and product previews. \"Product only\": product details + reviews only, no seller enrichment. \"Seller only\": provide STORE URLs in Start URLs — captures the seller profile + store reviews only (no product data).",
+            "description": "What to capture. \"Product + Seller (full)\": full product details plus the seller profile, store reviews and product previews. \"Product only\": product details + reviews only, no seller enrichment. \"Seller only\": provide STORE URLs in Start URLs — an independent browser pipeline opens each store page directly on the real local IP (no proxy, no fingerprint) and solves any captcha via 2captcha.",
             "editor": "select",
             "default": "product_and_seller",
             "enum": ["product_and_seller", "product_only", "seller_only"],
@@ -59,6 +59,27 @@
             "type": "boolean",
             "description": "Run Chrome in headless (new) mode. Disable to run headful via Xvfb, which is harder to detect but uses more resources.",
             "default": true
+        },
+        "twoCaptchaApiKey": {
+            "title": "2captcha API Key",
+            "type": "string",
+            "description": "API key for 2captcha (https://2captcha.com). Used by \"Seller only\" mode to solve reCAPTCHA punish pages. Falls back to the TWOCAPTCHA_API_KEY environment variable if left empty.",
+            "editor": "textfield",
+            "isSecret": true
+        },
+        "currency": {
+            "title": "Currency",
+            "type": "string",
+            "description": "Currency code forced via the AliExpress locale cookie (e.g. \"USD\"). Used by \"Seller only\" mode to keep the store page in a consistent locale.",
+            "default": "USD",
+            "editor": "textfield"
+        },
+        "language": {
+            "title": "Language (locale)",
+            "type": "string",
+            "description": "AliExpress UI locale forced via the locale cookie (e.g. \"en_US\"). Used by \"Seller only\" mode so the store header text matches the extraction selectors.",
+            "default": "en_US",
+            "editor": "textfield"
         }
     },
     "required": ["startUrls"]

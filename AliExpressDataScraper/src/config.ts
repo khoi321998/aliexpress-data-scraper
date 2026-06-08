@@ -14,7 +14,8 @@
  * What the run captures:
  *   - `product_and_seller`: full product DOM + seller profile (API) + seller/product reviews + previews.
  *   - `product_only`: product DOM + `sellerRef` + product reviews only (no seller API enrichment/previews).
- *   - `seller_only`: store URLs in; warm the home page + prime the token, then call the seller API only.
+ *   - `seller_only`: store URLs in; scrape the seller from the DOM (all-items previews + feedback
+ *     credibility/reviews) — `product` is null. No product page is visited.
  */
 export type ScraperMode = 'product_and_seller' | 'product_only' | 'seller_only';
 
@@ -30,6 +31,12 @@ export interface ScraperInput {
     maxRequestRetries?: number;
     proxyCountry?: string;
     headless?: boolean;
+    /** 2captcha API key used by the `seller_only` pipeline to solve reCAPTCHA punish pages. */
+    twoCaptchaApiKey?: string;
+    /** Currency code forced via the AliExpress locale cookie, e.g. "USD". */
+    currency?: string;
+    /** UI/content language as an AliExpress locale, e.g. "en_US". */
+    language?: string;
 }
 
 /** Fully-resolved configuration consumed by the crawler. */
@@ -45,6 +52,13 @@ export interface ScraperConfig {
     requestHandlerTimeoutSecs: number;
     headless: boolean;
     proxyCountry: string;
+
+    /** 2captcha API key (input or `TWOCAPTCHA_API_KEY` env). `undefined` = no solver configured. */
+    twoCaptchaApiKey?: string;
+    /** Currency forced via the AliExpress `aep_usuc_f` locale cookie (seller pipeline). */
+    currency: string;
+    /** AliExpress locale forced via the `aep_usuc_f` cookie, e.g. "en_US". */
+    language: string;
 
     sessionPool: {
         /** Small pool keeps residential IPs sticky and reused instead of churning. */
@@ -94,11 +108,14 @@ export function buildConfig(input: ScraperInput): ScraperConfig {
         maxConcurrency,
         maxRequestRetries: asPositiveInt(input.maxRequestRetries, 5),
         navigationTimeoutSecs: 45,
-        // Comfortably covers navigation + hydration wait + humanization + extraction, including the
-        // per-star review dropdown sweep (each level waits for its AJAX list reload to settle).
-        requestHandlerTimeoutSecs: 180,
+        // 6 minutes: covers product extraction PLUS the `product_and_seller` seller scrape, which runs
+        // in a separate local browser and may include a 2captcha solve (up to ~5 min) on the store pages.
+        requestHandlerTimeoutSecs: 360,
         headless: input.headless ?? true,
         proxyCountry: (input.proxyCountry ?? 'US').toUpperCase(),
+        twoCaptchaApiKey: input.twoCaptchaApiKey || process.env.TWOCAPTCHA_API_KEY || undefined,
+        currency: input.currency || 'USD',
+        language: input.language || 'en_US',
         sessionPool: {
             // A touch larger than concurrency so a retired session can be replaced without stalling.
             maxPoolSize: Math.max(maxConcurrency + 2, 4),

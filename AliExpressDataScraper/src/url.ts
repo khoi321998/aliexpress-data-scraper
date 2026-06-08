@@ -56,11 +56,12 @@ export const HOME_URL = 'https://www.aliexpress.com/';
  * URLs are store pages rather than product pages.
  *
  * The store id doubles as the `sellerId` for the MTOP seller API — the same fallback the PDP path
- * already uses (see `extractSellerRef` in `seller.ts`).
+ * already uses (see `extractSellerRef` in `seller.ts`). Also returns `allItemsUrl`, the listing page
+ * the `seller_only` pipeline actually navigates to (see {@link storeAllItemsUrl}).
  *
  * Returns `null` if the input is not a recognizable AliExpress store URL.
  */
-export function normalizeAliExpressStoreUrl(raw: string): { id: string; url: string } | null {
+export function normalizeAliExpressStoreUrl(raw: string): { id: string; url: string; allItemsUrl: string } | null {
     let parsed: URL;
     try {
         parsed = new URL(raw.trim());
@@ -79,5 +80,27 @@ export function normalizeAliExpressStoreUrl(raw: string): { id: string; url: str
     }
 
     const id = match[1];
-    return { id, url: `https://www.aliexpress.com/store/${id}` };
+    return { id, url: `https://www.aliexpress.com/store/${id}`, allItemsUrl: storeAllItemsUrl(id) };
+}
+
+/**
+ * The store's "All items" listing page, e.g. `https://www.aliexpress.com/store/<id>/pages/all-items.html`.
+ *
+ * This is where `seller_only` mode navigates: unlike the bare `/store/<id>` landing page (a curated
+ * marketing layout), the all-items page renders a paginated grid of every product the seller offers,
+ * which is what we scrape into {@link SellerProductPreview}s.
+ */
+export function storeAllItemsUrl(id: string): string {
+    return `https://www.aliexpress.com/store/${id}/pages/all-items.html`;
+}
+
+/**
+ * The store's "Feedback" page, e.g. `https://www.aliexpress.com/store/feedback-score/<id>.html`.
+ *
+ * This is the page behind the store nav's "Feedback" tab. Its panel renders the seller's credibility
+ * scores and positive/neutral/negative review counts directly in the DOM, which `seller_only` mode
+ * scrapes instead of calling the MTOP seller API (no token dance, no `sellerSeq` needed).
+ */
+export function storeFeedbackUrl(id: string): string {
+    return `https://www.aliexpress.com/store/feedback-score/${id}.html`;
 }

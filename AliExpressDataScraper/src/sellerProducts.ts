@@ -167,3 +167,131 @@ export async function extractSellerProductPreviews(page: Page, log?: Log, limit 
     log?.info('seller product previews extracted', { count: previews.length });
     return previews;
 }
+
+// --- Store "All items" listing grid -------------------------------------------------------------
+//
+// The `seller_only` pipeline navigates to `/store/<id>/pages/all-items.html`, whose product grid is
+// a DIFFERENT layout from the PDP strip above: a `display:grid` of fully inline-styled cards (no
+// `product-img` class, no `aria-label` price). Each card is an `<a ae_object_type="product"
+// href="…/item/<id>.html">` that carries a `utlogmap` attribute (URL-encoded JSON with `x_object_id`
+// / `prod` and `star_rating`), shows the title in a `span[numberoflines]` / the image `alt`, splits
+// the current price across several big-font (`font-size: 24px`) spans, and renders the original price
+// struck through (`text-decoration: line-through`). We anchor on the stable `ae_object_type` /
+// `numberoflines` / inline-style fragments rather than the hashed class names.
+
+/** The product cards on the store all-items page; `ae_object_type="product"` is stable across builds. */
+const ALL_ITEMS_CARD_SELECTOR = 'a[ae_object_type="product"][href*="/item/"]';
+
+/** One all-items card's raw strings, plus the `utlogmap`-derived product id as a fallback. */
+interface RawStorePreview {
+    href: string | null;
+    image: string | null;
+    title: string | null;
+    priceText: string | null;
+    originalPriceText: string | null;
+    soldText: string | null;
+    /** Product id read from the card's `utlogmap` JSON, used when the href has no `/item/<id>`. */
+    utProductId: string | null;
+}
+
+/**
+ * Extract up to `limit` product previews from the store's all-items grid
+ * (`/store/<id>/pages/all-items.html`), de-duplicated by product id.
+ *
+ * Returns an empty array when no product cards are present. Best-effort per field; `discountPercent`
+ * is derived from the current vs. original price (the grid shows a "Save ₫…" string, not a "-NN%"
+ * badge), so it's only set when both prices parse.
+ */
+export async function extractStoreAllItemsPreviews(page: Page, log?: Log, limit = 60): Promise<SellerProductPreview[]> {
+    const raw = await page
+        .evaluate((cardSelector) => {
+            return Array.from(document.querySelectorAll(cardSelector)).map((card) => {
+                // Product image: the first <img> with a real (http/protocol-relative) src — skips the
+                // inline base64 rating-star and badge images that share the card.
+                const productImg = Array.from(card.querySelectorAll('img')).find((im) =>
+                    /^(https?:)?\/\//.test(im.getAttribute('src') || ''),
+                );
+
+                const titleEl = card.querySelector('span[numberoflines]');
+                const title = (titleEl ? titleEl.textContent : null) || (productImg ? productImg.getAttribute('alt') : null);
+
+                // Original price is the struck-through node; the current price lives in its sibling
+                // big-font spans. The price row is the parent of either, and its text concatenates both
+                // (e.g. "₫35,706₫59,401"), so we strip the original back out to isolate the current price.
+                const origEl = card.querySelector('[style*="line-through"]');
+                const originalPriceText = origEl ? origEl.textContent : null;
+                const bigEl = card.querySelector('[style*="font-size: 24px"]');
+                const priceRow = (bigEl && bigEl.parentElement) || (origEl && origEl.parentElement) || null;
+                let priceText: string | null = priceRow ? priceRow.textContent : null;
+                if (priceText && originalPriceText) {
+                    priceText = priceText.split(originalPriceText).join('');
+                }
+
+                // Sold count is a leaf node like "800+ sold".
+                const soldEl = Array.from(card.querySelectorAll('div, span')).find(
+                    (el) => el.children.length === 0 && /[\d.,]+\+?\s*sold/i.test((el.textContent || '').trim()),
+                );
+
+                // Fallback product id from the card's tracking map (URL-encoded JSON).
+                let utProductId: string | null = null;
+                const ut = card.getAttribute('utlogmap');
+                if (ut) {
+                    try {
+                        const m = JSON.parse(decodeURIComponent(ut)) as { x_object_id?: unknown; prod?: unknown };
+                        const id = m.x_object_id ?? m.prod;
+                        utProductId = id != null ? String(id) : null;
+                    } catch {
+                        utProductId = null;
+                    }
+                }
+
+                return {
+                    href: card.getAttribute('href'),
+                    image: productImg ? productImg.getAttribute('src') : null,
+                    title,
+                    priceText,
+                    originalPriceText,
+                    soldText: soldEl ? soldEl.textContent : null,
+                    utProductId,
+                } as RawStorePreview;
+            });
+        }, ALL_ITEMS_CARD_SELECTOR)
+        .catch(() => [] as RawStorePreview[]);
+
+    const seen = new Set<string>();
+    const previews: SellerProductPreview[] = [];
+    for (const card of raw) {
+        const productId = (card.href && extractAliExpressItemId(card.href)) || card.utProductId;
+        // De-duplicate by product id (a card can repeat if a slot is re-rendered); keep id-less cards too.
+        if (productId) {
+            if (seen.has(productId)) continue;
+            seen.add(productId);
+        }
+
+        const priceText = clean(card.priceText);
+        const originalPriceText = clean(card.originalPriceText);
+        const price = parseMoney(priceText);
+        const originalPrice = parseMoney(originalPriceText);
+        const discountPercent =
+            price != null && originalPrice != null && originalPrice > 0 ? Math.round((1 - price / originalPrice) * 100) : null;
+
+        previews.push({
+            productId,
+            title: clean(card.title),
+            url: ensureAbsolute(card.href),
+            imageUrl: ensureAbsolute(card.image),
+            price,
+            priceText,
+            originalPrice,
+            originalPriceText,
+            discountPercent,
+            soldCount: parseCount(card.soldText),
+            soldText: clean(card.soldText),
+        });
+
+        if (previews.length >= limit) break;
+    }
+
+    log?.info('store all-items previews extracted', { count: previews.length });
+    return previews;
+}
