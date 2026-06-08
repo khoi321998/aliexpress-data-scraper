@@ -11,10 +11,10 @@ import { simulateBrowsing } from './humanize.js';
 import { extractMedia } from './media.js';
 import { extractPricing } from './pricing.js';
 import { createAliExpressResponse } from './response.js';
-import { extractReviews } from './reviews.js';
+import { collectProductReviews, collectSellerReviews } from './reviewsApi.js';
 import { extractSellerRef } from './seller.js';
 import { extractSellerProductPreviews } from './sellerProducts.js';
-import { fetchSellerInfo, fetchSellerReviews, parseSellerInfo, primeMtopToken } from './sellerApi.js';
+import { fetchSellerInfo, parseSellerInfo, primeMtopToken } from './sellerApi.js';
 import { extractShipping } from './shipping.js';
 import { extractSpecifications } from './specifications.js';
 import { extractStock } from './stock.js';
@@ -194,12 +194,14 @@ export function createRouter(config: ScraperConfig) {
                 scrapedSellerIds.add(sellerId);
                 try {
                     const apiRes = await fetchSellerInfo(page, sellerId, log);
-                    const reviewsRes = await fetchSellerReviews(page, sellerId, log);
+                    // Store reviews, collected per star (5→1) like the product reviews — at most 5
+                    // samples per star, keeping only the display fields shown on the store panel.
+                    const sellerReviews = await collectSellerReviews(page, sellerId, log, { perStar: 5 });
                     const parsed = parseSellerInfo(apiRes);
                     log.info('seller API fetched', {
                         sellerId,
                         info: Boolean(parsed),
-                        reviews: Boolean(reviewsRes),
+                        reviews: sellerReviews?.length ?? 0,
                     });
                     if (parsed) {
                         // Promote the seller from a bare reference to a full profile on the response.
@@ -209,6 +211,7 @@ export function createRouter(config: ScraperConfig) {
                             feedbackScore: parsed.totalCount,
                             storeNum: parsed.storeNum,
                             countryCode: parsed.countryCode,
+                            countryName: parsed.countryName,
                             followersText: parsed.followersText,
                             openedSinceText: parsed.openedSinceText,
                             storeLogo: parsed.storeLogo,
@@ -219,9 +222,7 @@ export function createRouter(config: ScraperConfig) {
                                 total: parsed.totalCount,
                             },
                             scores: parsed.scores,
-                            // DEBUG: raw seller feedback/reviews response saved so we can inspect its
-                            // full shape in the dataset before writing the review parser.
-                            rawReviews: reviewsRes,
+                            sellerReviews: sellerReviews ?? [],
                         };
                     }
                 } catch (error) {
@@ -242,8 +243,15 @@ export function createRouter(config: ScraperConfig) {
             }
         }
 
-        // Reviews — ratings summary + sample reviews (Customer Reviews tab → "View more" → modal).
-        response.product.reviewsSummary = await extractReviews(page, log);
+        // Reviews — fetched from the product reviews API (`mtop.aliexpress.review.pc.list`), which
+        // gives the overall rating, per-star breakdown and sample reviews. One call per star (1→5),
+        // at most 5 sample reviews each. Leaves the empty default in place if the API yields nothing.
+        const productId = response.product.id;
+        const sellerSeq = response.sellerRef?.platformSellerId ?? null;
+        const apiReviews = productId ? await collectProductReviews(page, productId, sellerSeq, log, { perStar: 5 }) : null;
+        if (apiReviews) {
+            response.product.reviewsSummary = apiReviews;
+        }
         log.info('reviews extracted', {
             rating: response.product.reviewsSummary.rating,
             reviewCount: response.product.reviewsSummary.reviewCount,

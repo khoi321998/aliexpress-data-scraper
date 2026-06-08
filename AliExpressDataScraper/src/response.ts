@@ -15,24 +15,9 @@ export function createAliExpressResponse(url: string): ProductSellerResponse {
         capturedAt: new Date().toISOString(),
         captureMode: 'product_only',
         product: {
-            id: {
-                platformItemId: extractAliExpressItemId(url) ?? '',
-                otherIds: {
-                    mpn: null,
-                    modelNumber: null,
-                    ean: null,
-                    upc: null,
-                    gtin: null,
-                },
-            },
+            id: extractAliExpressItemId(url) ?? '',
             title: '',
             brand: null,
-            category: {
-                breadcrumb: [],
-                leafCategoryName: null,
-                leafCategoryId: null,
-                categoryPathIds: [],
-            },
             pricing: {
                 currency: '',
                 price: null,
@@ -47,13 +32,6 @@ export function createAliExpressResponse(url: string): ProductSellerResponse {
                 conditionText: null,
                 returnPolicySummary: null,
                 guaranteeLabels: [],
-                authenticityClaims: [],
-            },
-            origin: {
-                itemLocationText: null,
-                itemCountryCode: null,
-                shipsFromLocations: [],
-                warehouseCountryCodes: [],
             },
             shipping: {
                 options: [],

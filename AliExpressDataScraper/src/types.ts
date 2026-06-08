@@ -25,41 +25,19 @@ export interface ProductSellerResponse {
 }
 
 export interface Product {
-    id: ProductId;
+    /** The marketplace's native item identifier (e.g. AliExpress productId). */
+    id: string;
     title: string;
     brand: string | null;
-    category: Category;
     pricing: Pricing;
     stock: Stock;
     condition: Condition;
-    origin: Origin;
     shipping: Shipping;
     paymentMethods: string[];
     description: Description;
     specifications: Specification[];
     media: Media;
     reviewsSummary: ReviewsSummary;
-}
-
-export interface ProductId {
-    /** The marketplace's native item identifier (e.g. eBay item id, AliExpress productId). */
-    platformItemId: string;
-    otherIds: OtherIds;
-}
-
-export interface OtherIds {
-    mpn: string | null;
-    modelNumber: string | null;
-    ean: string | null;
-    upc: string | null;
-    gtin: string | null;
-}
-
-export interface Category {
-    breadcrumb: string[];
-    leafCategoryName: string | null;
-    leafCategoryId: string | null;
-    categoryPathIds: string[];
 }
 
 export interface Pricing {
@@ -78,14 +56,6 @@ export interface Condition {
     conditionText: string | null;
     returnPolicySummary: string | null;
     guaranteeLabels: string[];
-    authenticityClaims: string[];
-}
-
-export interface Origin {
-    itemLocationText: string | null;
-    itemCountryCode: string | null;
-    shipsFromLocations: string[];
-    warehouseCountryCodes: string[];
 }
 
 export interface Shipping {
@@ -148,6 +118,10 @@ export interface ReviewSample {
     user: string;
     userFeedbackScore: number | null;
     comment: string;
+    /** English machine-translation of {@link comment}, when the review was written in another language. */
+    commentTranslated?: string | null;
+    /** ISO-3166 country code of the reviewer, e.g. "BR" (from the reviews API). */
+    country?: string | null;
     /** Free-text recency label as shown on the page, e.g. "Past 6 months". */
     commentDate: string;
     /** Star rating of this individual review (1–5), when shown. The only sentiment signal AliExpress exposes. */
@@ -189,6 +163,31 @@ export interface SellerProductPreview {
     soldText: string | null;
 }
 
+/**
+ * A single seller-store review — the lean subset shown on the store's "Customer reviews" panel:
+ * variant bought, reviewer, country, date, star rating, the comment, and any buyer photos.
+ * Deliberately narrower than {@link ReviewSample} (no feedback score / verified flag) since the
+ * seller endpoint only surfaces these display fields.
+ */
+export interface SellerReviewSample {
+    /** Reviewer's masked display name, e.g. "A***z". */
+    user: string;
+    /** ISO-3166 country code of the reviewer, e.g. "MX". */
+    country: string | null;
+    /** The variant the reviewer bought, e.g. "Metal Color:3-Gold". */
+    sku: string | null;
+    /** Star rating of this review (1–5), when shown. */
+    rating: number | null;
+    /** Date shown on the review, e.g. "14 Aug 2025". */
+    commentDate: string;
+    /** The review text, in its original language. */
+    comment: string;
+    /** English machine-translation of {@link comment}, when written in another language. */
+    commentTranslated?: string | null;
+    /** Buyer-uploaded photo URLs attached to this review. */
+    images: string[];
+}
+
 /** Full seller profile. Shape extends as more seller fields are scraped. */
 export interface Seller {
     platformSellerId: string | null;
@@ -198,6 +197,8 @@ export interface Seller {
     feedbackScore: number | null;
     /** Other products by this seller, scraped from the PDP recommendation strip. */
     productPreviews?: SellerProductPreview[];
+    /** Sample store reviews, collected per star rating (at most a few per star). */
+    sellerReviews?: SellerReviewSample[];
     [key: string]: unknown;
 }
 

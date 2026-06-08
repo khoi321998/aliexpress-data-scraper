@@ -5,8 +5,7 @@
 // (e.g. "Return&refund policy", "Security & Privacy"). We surface the return/refund row as the
 // `returnPolicySummary` and collect every commitment label into `guaranteeLabels`.
 //
-// `conditionText` and `authenticityClaims` are not exposed in this panel, so they stay at their
-// defaults (null / empty array).
+// `conditionText` is not exposed in this panel, so it stays at its default (null).
 //
 // Class names are content-hashed per build, so we match on stable `shipping--title` /
 // `choice-mind` prefixes rather than exact suffixed names.
@@ -67,6 +66,5 @@ export async function extractCondition(page: Page): Promise<Condition> {
         conditionText: null,
         returnPolicySummary,
         guaranteeLabels,
-        authenticityClaims: [],
     };
 }

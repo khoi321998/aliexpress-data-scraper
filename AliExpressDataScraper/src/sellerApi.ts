@@ -25,6 +25,9 @@ const SELLER_INFO_API = 'mtop.ae.shop.seller.page.info';
 // keyed by seller id it returns the seller's feedback/reviews — not per-product evaluations.
 const SELLER_REVIEWS_API = 'evaluation.productEvaluation';
 const SELLER_REVIEWS_VERSION = '102'; // This API is versioned 102, not 1.0.
+// Per-PRODUCT reviews (the 1–5 star buyer reviews shown on the PDP). Keyed by productId (+ the
+// seller id); the `filter` param selects a single star, e.g. "5" → 5-star reviews only.
+const PRODUCT_REVIEWS_API = 'mtop.aliexpress.review.pc.list';
 const CALLBACK = 'mtopjsonp_ae_seller';
 const MAX_ATTEMPTS = 3; // The token dance needs at most 2; allow a spare for transient errors.
 
@@ -34,6 +37,7 @@ const DEFAULT_APP_KEY = '24815441';
 const APP_KEY_BY_API: Record<string, string> = {
     [SELLER_INFO_API]: '12574478',
     [SELLER_REVIEWS_API]: '24815441',
+    [PRODUCT_REVIEWS_API]: '12574478',
 };
 
 /** The appKey to sign/send for a given API (falls back to the default AliExpress key). */
@@ -227,6 +231,8 @@ export interface ParsedSellerInfo {
     /** The internal store number — this is the `storeId` that `benefit.info` needs. */
     storeNum: string | null;
     countryCode: string | null;
+    /** Full country name as shown on the store page, e.g. "China". */
+    countryName: string | null;
     followersText: string | null;
     openedSinceText: string | null;
     storeLogo: string | null;
@@ -261,6 +267,7 @@ export function parseSellerInfo(res: unknown): ParsedSellerInfo | null {
         storeName: typeof sb.storeName === 'string' ? sb.storeName : null,
         storeNum: typeof sb.storeNum === 'string' ? sb.storeNum : null,
         countryCode: typeof sb.countryCode === 'string' ? sb.countryCode : null,
+        countryName: typeof sb.countryName === 'string' ? sb.countryName : null,
         followersText: typeof sb.follows === 'string' ? sb.follows : null,
         openedSinceText: typeof sb.since === 'string' ? sb.since : null,
         storeLogo: typeof sb.storeLogo === 'string' ? sb.storeLogo : null,
@@ -338,4 +345,42 @@ export async function fetchSellerReviews(
         log,
         SELLER_REVIEWS_VERSION,
     );
+}
+
+/**
+ * Fetch a page of a PRODUCT's buyer reviews (`mtop.aliexpress.review.pc.list`). Keyed by `productId`
+ * and the seller id (`sellerAdminSeq`). `filter` selects a single star rating ("1".."5"); pass an
+ * empty string (the default) for all stars. Returns the raw MTOP response, or `null` on failure.
+ */
+export async function fetchProductReviews(
+    page: Page,
+    productId: string | number,
+    sellerAdminSeq: string | number | null,
+    log: Log,
+    opts: SellerApiOptions & { page?: number; pageSize?: number; filter?: string | number; sort?: string } = {},
+): Promise<unknown | null> {
+    const {
+        locale = 'en_US',
+        country = 'US',
+        page: pageNum = 1,
+        pageSize = 10,
+        filter = '',
+        sort = 'complex_default',
+    } = opts;
+    const data: Record<string, unknown> = {
+        productId: String(productId),
+        page: pageNum,
+        pageSize,
+        _lang: locale,
+        filter: String(filter),
+        sort,
+        country,
+        clientType: 'web',
+    };
+    // Only include the seller id when we actually have it — some PDPs are scraped before the seller
+    // ref is resolved, and the endpoint still returns reviews keyed by productId alone.
+    if (sellerAdminSeq != null && sellerAdminSeq !== '') {
+        data.sellerAdminSeq = Number(sellerAdminSeq);
+    }
+    return callMtop(page, PRODUCT_REVIEWS_API, data, log);
 }
