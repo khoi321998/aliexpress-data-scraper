@@ -4,10 +4,19 @@
     "type": "object",
     "schemaVersion": 1,
     "properties": {
+        "mode": {
+            "title": "Scrape Mode",
+            "type": "string",
+            "description": "What to capture. \"Product + Seller (full)\": full product details plus the seller profile, store reviews and product previews. \"Product only\": product details + reviews only, no seller enrichment. \"Seller only\": provide STORE URLs in Start URLs — captures the seller profile + store reviews only (no product data).",
+            "editor": "select",
+            "default": "product_and_seller",
+            "enum": ["product_and_seller", "product_only", "seller_only"],
+            "enumTitles": ["Product + Seller (full)", "Product only", "Seller only (store URLs)"]
+        },
         "startUrls": {
             "title": "Start URLs",
             "type": "array",
-            "description": "AliExpress product detail page URLs to scrape.",
+            "description": "URLs to scrape. For the \"Product\" modes these are product detail pages (https://www.aliexpress.com/item/<id>.html). For \"Seller only\" mode these are store pages (https://www.aliexpress.com/store/<id>).",
             "editor": "requestListSources",
             "prefill": [
                 {

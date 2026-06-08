@@ -8,7 +8,7 @@
 
 export type Platform = 'ebay' | 'aliexpress' | string;
 
-export type CaptureMode = 'product_only' | 'product_and_seller' | string;
+export type CaptureMode = 'product_only' | 'product_and_seller' | 'seller_only' | string;
 
 /** Top-level scrape envelope returned for a single URL. */
 export interface ProductSellerResponse {
@@ -17,7 +17,8 @@ export interface ProductSellerResponse {
     /** ISO-8601 timestamp of when the page was captured. */
     capturedAt: string;
     captureMode: CaptureMode;
-    product: Product;
+    /** The scraped product, or `null` in `seller_only` runs (no product page is visited). */
+    product: Product | null;
     sellerRef: SellerRef | null;
     seller: Seller | null;
     technical: Technical;

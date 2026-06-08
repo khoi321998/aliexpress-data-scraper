@@ -1,5 +1,31 @@
-import type { ProductSellerResponse } from './types.js';
+import type { Product, ProductSellerResponse, Technical } from './types.js';
 import { extractAliExpressItemId } from './url.js';
+
+/** The empty {@link Technical} diagnostics block shared by every response skeleton. */
+function emptyTechnical(): Technical {
+    return {
+        scriptBlocks: [],
+        jsonState: {},
+        dataAttributes: {},
+        rawUrlParameters: {},
+        experimentIds: [],
+        trackingIds: {
+            googleAnalytics: [],
+            facebookPixel: [],
+        },
+        pageContext: {
+            pageType: null,
+            searchQuery: null,
+            position: 0,
+            listingType: null,
+            campaignId: null,
+        },
+        fulfilmentCodes: [],
+        jsBundles: [],
+        cssBundles: [],
+        apiEndpoints: [],
+    };
+}
 
 /**
  * Build an empty AliExpress {@link ProductSellerResponse} skeleton for a given product URL.
@@ -7,8 +33,12 @@ import { extractAliExpressItemId } from './url.js';
  * Every field is initialized to its "absent" default (null / empty array / empty object)
  * so scrapers only have to fill in what they actually find on the page. `platform`,
  * `url`, `capturedAt` and the product id are populated up front.
+ *
+ * The return type narrows `product` to non-null (it's always built here), so the product handler
+ * can assign `response.product.<field>` without null checks even though the DTO field is nullable
+ * (only `seller_only` runs, which use {@link createSellerOnlyResponse}, leave it null).
  */
-export function createAliExpressResponse(url: string): ProductSellerResponse {
+export function createAliExpressResponse(url: string): ProductSellerResponse & { product: Product } {
     return {
         platform: 'aliexpress',
         url,
@@ -58,28 +88,32 @@ export function createAliExpressResponse(url: string): ProductSellerResponse {
         },
         sellerRef: null,
         seller: null,
-        technical: {
-            scriptBlocks: [],
-            jsonState: {},
-            dataAttributes: {},
-            rawUrlParameters: {},
-            experimentIds: [],
-            trackingIds: {
-                googleAnalytics: [],
-                facebookPixel: [],
-            },
-            pageContext: {
-                pageType: null,
-                searchQuery: null,
-                position: 0,
-                listingType: null,
-                campaignId: null,
-            },
-            fulfilmentCodes: [],
-            jsBundles: [],
-            cssBundles: [],
-            apiEndpoints: [],
+        technical: emptyTechnical(),
+        sellerTechnical: null,
+    };
+}
+
+/**
+ * Build a {@link ProductSellerResponse} skeleton for a `seller_only` run.
+ *
+ * There is no product page in this mode, so `product` is `null`. We seed `sellerRef` from the store
+ * URL + parsed store id (the handler fills `name` from the seller API), leaving `seller` for the
+ * handler to populate once the API responds.
+ */
+export function createSellerOnlyResponse(storeUrl: string, storeId: string): ProductSellerResponse {
+    return {
+        platform: 'aliexpress',
+        url: storeUrl,
+        capturedAt: new Date().toISOString(),
+        captureMode: 'seller_only',
+        product: null,
+        sellerRef: {
+            platformSellerId: storeId,
+            name: null,
+            url: storeUrl,
         },
+        seller: null,
+        technical: emptyTechnical(),
         sellerTechnical: null,
     };
 }

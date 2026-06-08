@@ -10,7 +10,7 @@ import type { ScraperInput } from './config.js';
 import { buildConfig } from './config.js';
 import { createRouter } from './routes.js';
 import { applyRegionOverrides, applyStealthInitScript, CHROME_LAUNCH_ARGS, FINGERPRINT_OPTIONS } from './stealth.js';
-import { normalizeAliExpressUrl } from './url.js';
+import { HOME_URL, normalizeAliExpressStoreUrl, normalizeAliExpressUrl } from './url.js';
 
 // Load a local `.env` (e.g. TWOCAPTCHA_API_KEY) for local runs. On the Apify platform these
 // come from the Actor's environment variables, so a missing file is fine — ignore the error.
@@ -28,30 +28,67 @@ const config = buildConfig(input);
 log.info('Resolved scraper config.', { ...config });
 
 if (!input.startUrls?.length) {
-    throw new Error('Input "startUrls" must contain at least one AliExpress product URL.');
+    throw new Error('Input "startUrls" must contain at least one AliExpress URL.');
 }
 
-// Normalize whatever the user pasted (vi./de./m. subdomains, tracking params, …) to the
-// canonical https://www.aliexpress.com/item/<id>.html, dropping anything unrecognizable and
-// de-duplicating links that point to the same product.
-const requestUrls = [
-    ...new Set(
-        input.startUrls.flatMap(({ url }) => {
-            const normalized = normalizeAliExpressUrl(url);
-            if (!normalized) {
-                log.warning(`Skipping non-product AliExpress URL: ${url}`);
-                return [];
-            }
-            if (normalized !== url) {
-                log.info(`Normalized URL: ${url} -> ${normalized}`);
-            }
-            return [normalized];
-        }),
-    ),
-];
+// A Crawlee request descriptor. `seller_only` needs the label/uniqueKey/userData fields; the
+// product modes only set `url`.
+type RequestDescriptor = { url: string; label?: string; uniqueKey?: string; userData?: Record<string, unknown> };
 
-if (!requestUrls.length) {
-    throw new Error('No valid AliExpress product URLs found in "startUrls".');
+let requests: RequestDescriptor[];
+
+if (config.mode === 'seller_only') {
+    // `seller_only` start URLs are STORE pages. We parse the store id, then navigate every request
+    // to the neutral home page (warm cookies + prime token) and call the seller API from there —
+    // the store page itself is too heavily anti-bot protected. Every request shares the same home
+    // URL, so an explicit per-seller `uniqueKey` is essential: without it Crawlee would de-dupe all
+    // sellers down to a single request.
+    const seenStoreIds = new Set<string>();
+    requests = input.startUrls.flatMap(({ url }) => {
+        const store = normalizeAliExpressStoreUrl(url);
+        if (!store) {
+            log.warning(`Skipping non-store AliExpress URL (mode=seller_only): ${url}`);
+            return [];
+        }
+        if (seenStoreIds.has(store.id)) {
+            return [];
+        }
+        seenStoreIds.add(store.id);
+        return [
+            {
+                url: HOME_URL,
+                label: 'SELLER',
+                uniqueKey: `seller:${store.id}`,
+                userData: { sellerId: store.id, sourceUrl: store.url },
+            },
+        ];
+    });
+    if (!requests.length) {
+        throw new Error('No valid AliExpress store URLs found in "startUrls" for mode "seller_only".');
+    }
+} else {
+    // Product modes: normalize whatever the user pasted (vi./de./m. subdomains, tracking params, …)
+    // to the canonical https://www.aliexpress.com/item/<id>.html, dropping anything unrecognizable
+    // and de-duplicating links that point to the same product.
+    const productUrls = [
+        ...new Set(
+            input.startUrls.flatMap(({ url }) => {
+                const normalized = normalizeAliExpressUrl(url);
+                if (!normalized) {
+                    log.warning(`Skipping non-product AliExpress URL: ${url}`);
+                    return [];
+                }
+                if (normalized !== url) {
+                    log.info(`Normalized URL: ${url} -> ${normalized}`);
+                }
+                return [normalized];
+            }),
+        ),
+    ];
+    if (!productUrls.length) {
+        throw new Error('No valid AliExpress product URLs found in "startUrls".');
+    }
+    requests = productUrls.map((url) => ({ url }));
 }
 
 // AliExpress blocks datacenter IPs hard, so we route through Apify residential proxy. `checkAccess`
@@ -162,7 +199,7 @@ Actor.on('aborting', async () => {
     await Actor.exit();
 });
 
-await crawler.run(requestUrls);
+await crawler.run(requests);
 
 // Surface the total number of retries across the whole run. 0 means every URL succeeded on the
 // first attempt (no rotation needed) — a quick health signal for how aggressively AliExpress is

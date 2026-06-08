@@ -6,18 +6,20 @@ import type { Page } from 'playwright';
 import { extractCondition } from './condition.js';
 import type { ScraperConfig } from './config.js';
 import { extractDescription } from './description.js';
-import { classifyPage, isProductLoaded, TITLE_SELECTORS } from './detection.js';
+import { classifyPage, isBlockedPage, isCaptchaPage, isProductLoaded, isPunishPage, TITLE_SELECTORS } from './detection.js';
 import { simulateBrowsing } from './humanize.js';
 import { extractMedia } from './media.js';
 import { extractPricing } from './pricing.js';
-import { createAliExpressResponse } from './response.js';
+import { createAliExpressResponse, createSellerOnlyResponse } from './response.js';
 import { collectProductReviews, collectSellerReviews } from './reviewsApi.js';
 import { extractSellerRef } from './seller.js';
-import { extractSellerProductPreviews } from './sellerProducts.js';
+import type { ParsedSellerInfo } from './sellerApi.js';
 import { fetchSellerInfo, parseSellerInfo, primeMtopToken } from './sellerApi.js';
+import { extractSellerProductPreviews } from './sellerProducts.js';
 import { extractShipping } from './shipping.js';
 import { extractSpecifications } from './specifications.js';
 import { extractStock } from './stock.js';
+import type { Seller, SellerRef, SellerReviewSample } from './types.js';
 
 /** Try each candidate selector; return the first non-empty title text found. */
 async function readTitle(page: Page): Promise<string | null> {
@@ -72,6 +74,37 @@ function rotateAndRetry(
 }
 
 /**
+ * Promote a {@link SellerRef} to a full {@link Seller} profile by merging the parsed seller-API
+ * fields and (optionally) the collected store reviews. Shared by the product and seller-only
+ * handlers so the seller shape stays identical regardless of how it was reached.
+ */
+function buildSellerProfile(
+    sellerRef: SellerRef,
+    parsed: ParsedSellerInfo,
+    sellerReviews: SellerReviewSample[] | null,
+): Seller {
+    return {
+        ...sellerRef,
+        positiveFeedbackPercent: parsed.positiveFeedbackPercent,
+        feedbackScore: parsed.totalCount,
+        storeNum: parsed.storeNum,
+        countryCode: parsed.countryCode,
+        countryName: parsed.countryName,
+        followersText: parsed.followersText,
+        openedSinceText: parsed.openedSinceText,
+        storeLogo: parsed.storeLogo,
+        reviewCounts: {
+            positive: parsed.positiveCount,
+            neutral: parsed.neutralCount,
+            negative: parsed.negativeCount,
+            total: parsed.totalCount,
+        },
+        scores: parsed.scores,
+        sellerReviews: sellerReviews ?? [],
+    };
+}
+
+/**
  * Build the Playwright router for a given configuration.
  *
  * A factory (rather than a module-level singleton) so the handler can read the resolved
@@ -118,8 +151,11 @@ export function createRouter(config: ScraperConfig) {
         //     paying the token-bootstrap dance at that point. Best-effort.
         await primeMtopToken(page, log);
 
-        // 5. Extract. Start from the canonical DTO skeleton and fill what we find.
+        // 5. Extract. Start from the canonical DTO skeleton and fill what we find. captureMode is a
+        //    fixed function of the chosen run mode ('product_only' or 'product_and_seller'), not of
+        //    whether a seller happened to be found on the page.
         const response = createAliExpressResponse(request.url);
+        response.captureMode = config.mode;
         const title = await readTitle(page);
 
         if (!title || !(await isProductLoaded(page))) {
@@ -175,9 +211,10 @@ export function createRouter(config: ScraperConfig) {
         // Seller reference — name + store URL + seller id, read from the PDP "Sold By" block. The
         // seller id (sellerSeq) is what the seller API needs.
         response.sellerRef = await extractSellerRef(page);
-        if (response.sellerRef) {
-            // We now carry seller identity alongside the product, so reflect that in the mode.
-            response.captureMode = 'product_and_seller';
+        // The seller API enrichment + product previews only run in the full `product_and_seller`
+        // mode. `product_only` mode keeps the (cheap) `sellerRef` above — it also feeds the
+        // `sellerSeq` used by the product-reviews call below — but skips everything seller-specific.
+        if (response.sellerRef && config.mode === 'product_and_seller') {
             log.info('seller extracted', {
                 name: response.sellerRef.name,
                 platformSellerId: response.sellerRef.platformSellerId,
@@ -205,25 +242,7 @@ export function createRouter(config: ScraperConfig) {
                     });
                     if (parsed) {
                         // Promote the seller from a bare reference to a full profile on the response.
-                        response.seller = {
-                            ...response.sellerRef,
-                            positiveFeedbackPercent: parsed.positiveFeedbackPercent,
-                            feedbackScore: parsed.totalCount,
-                            storeNum: parsed.storeNum,
-                            countryCode: parsed.countryCode,
-                            countryName: parsed.countryName,
-                            followersText: parsed.followersText,
-                            openedSinceText: parsed.openedSinceText,
-                            storeLogo: parsed.storeLogo,
-                            reviewCounts: {
-                                positive: parsed.positiveCount,
-                                neutral: parsed.neutralCount,
-                                negative: parsed.negativeCount,
-                                total: parsed.totalCount,
-                            },
-                            scores: parsed.scores,
-                            sellerReviews: sellerReviews ?? [],
-                        };
+                        response.seller = buildSellerProfile(response.sellerRef, parsed, sellerReviews);
                     }
                 } catch (error) {
                     log.warning('Seller API call failed — skipping seller (product unaffected).', {
@@ -260,6 +279,60 @@ export function createRouter(config: ScraperConfig) {
 
         await pushData(response);
         log.info('extracted successfully');
+    });
+
+    // `seller_only` mode: each request navigates to the neutral home page (NOT the heavily
+    // anti-bot-protected store page) purely to warm cookies + prime the MTOP token, then calls the
+    // seller API keyed by the store id parsed from the input URL. There is no product page, so the
+    // response carries `product: null` and no product previews.
+    router.addHandler('SELLER', async (ctx) => {
+        const { request, page, log, pushData } = ctx;
+        const { sellerId, sourceUrl } = request.userData as { sellerId: string; sourceUrl: string };
+
+        // Lighter check than `classifyPage`: the home page legitimately has no product title, so
+        // `classifyPage` would return 'empty' and trip the product-mode rotate path forever. Here we
+        // only rotate on a *real* block (punish redirect / captcha / Cloudflare).
+        if (isPunishPage(page) || (await isCaptchaPage(page)) || (await isBlockedPage(page))) {
+            rotateAndRetry(ctx, 'seller-home-block');
+        }
+
+        // Let the home page settle, then behave like a person before firing the API (warms cookies).
+        const { minHydrationDelayMs, maxHydrationDelayMs } = config.humanize;
+        await page.waitForTimeout(minHydrationDelayMs + Math.random() * (maxHydrationDelayMs - minHydrationDelayMs));
+        await simulateBrowsing(page, config);
+
+        // Mint the `_m_h5_tk` token while the page is warm so the seller call succeeds first try.
+        await primeMtopToken(page, log);
+
+        const response = createSellerOnlyResponse(sourceUrl, sellerId);
+        // NOTE: in this mode `sellerId` is the public store id (the only identifier the store URL
+        // exposes). That is the same fallback the PDP path uses when no `sellerSeq` is present, so
+        // it's an exercised key; the parsers degrade gracefully (null/empty) if the API rejects it.
+        try {
+            const apiRes = await fetchSellerInfo(page, sellerId, log);
+            // TEMP DEBUG: dump the full raw seller.page.info response so we can see exactly what the
+            // API returns for a store id (ret code + whether `data` is populated or empty).
+            log.info('seller_only RAW seller.page.info', { sellerId, raw: JSON.stringify(apiRes) });
+            const sellerReviews = await collectSellerReviews(page, sellerId, log, { perStar: 5 });
+            const parsed = parseSellerInfo(apiRes);
+            log.info('seller API fetched (seller_only)', {
+                sellerId,
+                info: Boolean(parsed),
+                reviews: sellerReviews?.length ?? 0,
+            });
+            if (parsed) {
+                // Fill the store name from the API (the store URL alone doesn't carry it).
+                response.sellerRef!.name = parsed.storeName ?? response.sellerRef!.name;
+                response.seller = buildSellerProfile(response.sellerRef!, parsed, sellerReviews);
+            }
+        } catch (error) {
+            log.warning('Seller API call failed (seller_only).', {
+                error: error instanceof Error ? error.message : String(error),
+            });
+        }
+
+        await pushData(response);
+        log.info('seller_only extracted', { sellerId });
     });
 
     return router;
