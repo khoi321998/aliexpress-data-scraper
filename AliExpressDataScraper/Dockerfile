@@ -45,7 +45,9 @@ RUN npm --quiet set progress=false \
     && rm -r ~/.npm
 
 # Copy built JS files from builder image
-COPY --from=builder --chown=myuser:myuser /usr/src/app/dist ./dist
+# NOTE: the apify/actor-node-playwright-chrome:24 image uses WORKDIR /home/myuser,
+# not /usr/src/app, so the build output lives in /home/myuser/dist.
+COPY --from=builder --chown=myuser:myuser /home/myuser/dist ./dist
 
 # Next, copy the remaining files and directories with the source code.
 # Since we do this after NPM install, quick build will be really fast
