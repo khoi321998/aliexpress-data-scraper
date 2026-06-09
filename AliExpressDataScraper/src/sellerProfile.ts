@@ -15,6 +15,7 @@ import { chromium } from 'playwright';
 import type { Page } from 'playwright';
 
 import type { ScraperConfig } from './config.js';
+import { logEgressIp } from './ip.js';
 import { detectBlock, trySolveCaptcha } from './sellerCaptcha.js';
 import type { SellerFeedback } from './sellerFeedback.js';
 import { collectSellerReviewsFromDom, extractSellerFeedback } from './sellerFeedback.js';
@@ -105,12 +106,17 @@ async function passCaptcha(page: Page, config: ScraperConfig, log: Log, label: s
     return Boolean(await detectBlock(page));
 }
 
-/** Poll up to 30s for the SPA to render real content (avoid extracting off the loading spinner). */
-async function waitForReady(page: Page, predicate: () => boolean): Promise<void> {
+/**
+ * Poll up to 30s for the SPA to render real content (avoid extracting off the loading spinner).
+ * Returns `true` once the predicate matches, `false` if the 30s budget runs out — so it never hangs:
+ * the worst case is a bounded 30s wait, after which the caller extracts whatever is in the DOM.
+ */
+async function waitForReady(page: Page, predicate: () => boolean): Promise<boolean> {
     for (let i = 0; i < 30; i++) {
-        if (await page.evaluate(predicate).catch(() => false)) break;
+        if (await page.evaluate(predicate).catch(() => false)) return true;
         await page.waitForTimeout(1_000);
     }
+    return false;
 }
 
 /**
@@ -140,6 +146,10 @@ export async function scrapeSellerData(
     await page.evaluate(nameShim).catch(() => {});
     await page.addInitScript(nameShim).catch(() => {});
 
+    // Confirm the seller scrape is leaving via the REAL local/container IP (no proxy) — contrast this
+    // line with the "egress IP (product)" line, which should show the residential proxy IP.
+    await logEgressIp(page, log, 'seller');
+
     // --- Page 1: all-items grid → product previews ----------------------------------------------
     // In `seller_only` Crawlee has ALREADY navigated to the all-items page, so the caller passes
     // `alreadyOnAllItems: true` and we must NOT navigate again — a redundant second goto reloads the
@@ -150,13 +160,15 @@ export async function scrapeSellerData(
         await page.goto(storeAllItemsUrl(storeId), { waitUntil: 'domcontentloaded' }).catch(() => {});
     }
     let blocked = await passCaptcha(page, config, log, 'all-items');
-    await waitForReady(
-        page,
-        () =>
-            document.querySelector('a[ae_object_type="product"][href*="/item/"]') != null ||
-            /followers/i.test(document.body?.innerText ?? '') ||
-            document.querySelector('a[data-href*="/store/"]') != null,
-    );
+    // Wait specifically for a PRODUCT CARD to render — NOT just the store header. The header
+    // (followers text / store link) renders well before the product grid, so OR-ing it in here let us
+    // break early and extract an empty grid (→ 0 previews). Anchoring solely on the product card means
+    // we keep polling until the grid actually hydrates. Bounded to 30s by waitForReady, so a store that
+    // genuinely renders no cards just waits out the budget and extracts 0 — it never hangs.
+    const gridReady = await waitForReady(page, () => document.querySelector('a[ae_object_type="product"][href*="/item/"]') != null);
+    if (!gridReady) {
+        log.warning('all-items product grid did not render within 30s — previews may come back empty (page slow/blocked or store truly has no items)');
+    }
     const storeName = await readStoreName(page);
     const productPreviews = await extractStoreAllItemsPreviews(page, log, 10);
 

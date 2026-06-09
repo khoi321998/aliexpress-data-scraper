@@ -8,6 +8,7 @@ import type { ScraperConfig } from './config.js';
 import { extractDescription } from './description.js';
 import { classifyPage, isProductLoaded, TITLE_SELECTORS } from './detection.js';
 import { simulateBrowsing } from './humanize.js';
+import { logEgressIp } from './ip.js';
 import { extractMedia } from './media.js';
 import { extractPricing } from './pricing.js';
 import { createAliExpressResponse } from './response.js';
@@ -119,6 +120,9 @@ export function createRouter(config: ScraperConfig) {
             // `empty` after a full load + scroll is a soft block; rotate like a hard one.
             rotateAndRetry(ctx, status);
         }
+
+        // Confirm the product page is leaving via the residential proxy (expect a proxy IP here).
+        await logEgressIp(page, log, 'product');
 
         // 4b. Proactively mint the MTOP `_m_h5_tk` token now, while the page is warm and settled, so the
         //     product-reviews API call later reads a ready token and succeeds on its first attempt
