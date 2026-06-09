@@ -34,6 +34,14 @@ function normalizeLines(text: string): string {
  * surface verbatim as `deliveryTimeText` rather than guessing day ranges.
  */
 export async function extractShipping(page: Page): Promise<Shipping> {
+    // The service panel is rendered asynchronously — give the shipping rows a moment to mount
+    // before reading, otherwise we capture an empty panel on slower loads.
+    await page
+        .locator(SHIPPING_ITEM_SELECTOR)
+        .first()
+        .waitFor({ state: 'attached', timeout: 8_000 })
+        .catch(() => undefined);
+
     const rows = await page
         .locator(SHIPPING_ITEM_SELECTOR)
         .allTextContents()

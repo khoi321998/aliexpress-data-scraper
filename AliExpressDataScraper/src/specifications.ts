@@ -34,7 +34,7 @@ async function revealSpecifications(page: Page, log: Log): Promise<void> {
     if (await anchor.count().catch(() => 0)) {
         await anchor.scrollIntoViewIfNeeded({ timeout: 5_000 }).catch(() => undefined);
         await anchor.click({ timeout: 5_000 }).catch(() => undefined);
-        await page.waitForTimeout(800);
+        await page.waitForTimeout(1_200);
     }
 
     // 2. Poll for the lazy-rendered rows, nudging the section into view each round.
@@ -45,7 +45,7 @@ async function revealSpecifications(page: Page, log: Log): Promise<void> {
         }
         await section.scrollIntoViewIfNeeded({ timeout: 3_000 }).catch(() => undefined);
         await page.mouse.wheel(0, 400).catch(() => undefined);
-        await page.waitForTimeout(600);
+        await page.waitForTimeout(900);
     }
 
     // 3. Expand the truncated list. Only the "View more" state expands; once toggled it becomes
@@ -56,7 +56,7 @@ async function revealSpecifications(page: Page, log: Log): Promise<void> {
         if (label.includes('view more')) {
             await viewMore.scrollIntoViewIfNeeded({ timeout: 3_000 }).catch(() => undefined);
             await viewMore.click({ timeout: 5_000 }).catch(() => undefined);
-            await page.waitForTimeout(500);
+            await page.waitForTimeout(800);
             log.debug('expanded specifications via "View more"');
         }
     }
@@ -82,7 +82,7 @@ async function waitForProps(page: Page): Promise<{ props: ReturnType<Page['locat
         if (count > 0) {
             break;
         }
-        await page.waitForTimeout(1_000);
+        await page.waitForTimeout(1_500);
     }
     return { props, count };
 }
