@@ -11,7 +11,9 @@ import { simulateBrowsing } from './humanize.js';
 import { extractMedia } from './media.js';
 import { extractPricing } from './pricing.js';
 import { createAliExpressResponse } from './response.js';
+import { collectProductReviews } from './reviewsApi.js';
 import { extractSellerRef } from './seller.js';
+import { primeMtopToken } from './sellerApi.js';
 import { scrapeSellerLocal } from './sellerProfile.js';
 import { extractShipping } from './shipping.js';
 import { extractSpecifications } from './specifications.js';
@@ -86,9 +88,9 @@ function storeIdFromRef(url: string | null, platformSellerId: string | null): st
 export function createRouter(config: ScraperConfig) {
     const router = createPlaywrightRouter();
 
-    // Sellers scraped this run, keyed by store id — a seller shared across many products is scraped
-    // once and the built profile reused. In-memory (per run) is enough; it doesn't need to persist.
-    const sellerCache = new Map<string, Seller>();
+    // In-flight / resolved seller scrapes this run, keyed by store id. We cache the PROMISE so a seller
+    // shared across many products (even concurrently) triggers a single scrape that all of them await.
+    const sellerCache = new Map<string, Promise<Seller | null>>();
 
     router.addDefaultHandler(async (ctx) => {
         const { request, page, log, pushData } = ctx;
@@ -118,6 +120,11 @@ export function createRouter(config: ScraperConfig) {
             rotateAndRetry(ctx, status);
         }
 
+        // 4b. Proactively mint the MTOP `_m_h5_tk` token now, while the page is warm and settled, so the
+        //     product-reviews API call later reads a ready token and succeeds on its first attempt
+        //     instead of paying the token-bootstrap dance at that point. Best-effort.
+        await primeMtopToken(page, log);
+
         // 5. Extract. Start from the canonical DTO skeleton and fill what we find. captureMode is a
         //    fixed function of the chosen run mode ('product_only' or 'product_and_seller'), not of
         //    whether a seller happened to be found on the page.
@@ -132,6 +139,37 @@ export function createRouter(config: ScraperConfig) {
         }
 
         response.product.title = title as string;
+
+        // Seller reference — read it EARLY (right after we know the page is a real product) so we can
+        // kick off the slow, captcha-bound seller scrape NOW and let it run CONCURRENTLY with the rest
+        // of product extraction + reviews below. The scrape uses its own local browser, so it doesn't
+        // contend with the product page. We await the result just before pushData. `product_only` skips it.
+        response.sellerRef = await extractSellerRef(page);
+        let sellerPromise: Promise<Seller | null> | null = null;
+        if (response.sellerRef && config.mode === 'product_and_seller') {
+            log.info('seller extracted', {
+                name: response.sellerRef.name,
+                platformSellerId: response.sellerRef.platformSellerId,
+            });
+            const storeId = storeIdFromRef(response.sellerRef.url, response.sellerRef.platformSellerId);
+            if (storeId) {
+                // Cache the PROMISE (not the result) so concurrent products of the same store share a
+                // single in-flight scrape instead of each launching their own browser + captcha solve.
+                sellerPromise = sellerCache.get(storeId) ?? null;
+                if (!sellerPromise) {
+                    log.info(`🚀 Triggering seller scrape for store ${storeId} now (runs while we finish the product)…`);
+                    sellerPromise = scrapeSellerLocal(storeId, log, config)
+                        .then((r) => r.seller)
+                        .catch((error) => {
+                            log.warning('Seller DOM scrape failed — skipping seller (product unaffected).', {
+                                error: error instanceof Error ? error.message : String(error),
+                            });
+                            return null;
+                        });
+                    sellerCache.set(storeId, sellerPromise);
+                }
+            }
+        }
 
         // Media — images + videos from the PDP gallery.
         response.product.media = await extractMedia(page);
@@ -175,37 +213,29 @@ export function createRouter(config: ScraperConfig) {
             guaranteeLabels: response.product.condition.guaranteeLabels.length,
         });
 
-        // Seller reference — name + store URL + seller id, read from the PDP "Sold By" block.
-        response.sellerRef = await extractSellerRef(page);
+        // Reviews — fetched from the product reviews API (`mtop.aliexpress.review.pc.list`), which gives
+        // the overall rating, per-star breakdown and sample reviews. One call per star (5→1), at most 5
+        // sample reviews each. Runs on the product `page` (its warm session + the token primed in 4b),
+        // independent of the seller scrape (which uses its own local browser). Leaves the empty default
+        // in place if the API yields nothing. Runs in BOTH product modes.
+        const productId = response.product.id;
+        const sellerSeq = response.sellerRef?.platformSellerId ?? null;
+        const apiReviews = productId ? await collectProductReviews(page, productId, sellerSeq, log, { perStar: 5 }) : null;
+        if (apiReviews) {
+            response.product.reviewsSummary = apiReviews;
+        }
+        log.info('reviews extracted', {
+            rating: response.product.reviewsSummary.rating,
+            reviewCount: response.product.reviewsSummary.reviewCount,
+            samples: response.product.reviewsSummary.reviewSamples.length,
+        });
 
-        // Seller enrichment runs only in `product_and_seller` mode. `product_only` keeps the cheap
-        // `sellerRef` above and skips everything seller-specific. We hand off to the SAME DOM seller
-        // pipeline used by `seller_only` (store all-items + feedback pages), de-duped per run so a
-        // seller shared across many products is scraped once. This navigates away from the PDP — fine,
-        // all product fields are already extracted above.
-        if (response.sellerRef && config.mode === 'product_and_seller') {
-            log.info('seller extracted', {
-                name: response.sellerRef.name,
-                platformSellerId: response.sellerRef.platformSellerId,
-            });
-            const storeId = storeIdFromRef(response.sellerRef.url, response.sellerRef.platformSellerId);
-            if (storeId) {
-                const cached = sellerCache.get(storeId);
-                if (cached) {
-                    response.seller = cached;
-                } else {
-                    try {
-                        // Local browser (no proxy / no fingerprint) — the seller scrape must NOT use the
-                        // product page's US residential proxy + spoofed fingerprint.
-                        const { seller } = await scrapeSellerLocal(storeId, log, config);
-                        response.seller = seller;
-                        sellerCache.set(storeId, seller);
-                    } catch (error) {
-                        log.warning('Seller DOM scrape failed — skipping seller (product unaffected).', {
-                            error: error instanceof Error ? error.message : String(error),
-                        });
-                    }
-                }
+        // Await the seller scrape kicked off early above. By now its captcha solve has overlapped all of
+        // the product extraction + reviews, so this usually resolves immediately. null = scrape failed/skipped.
+        if (sellerPromise) {
+            const seller = await sellerPromise;
+            if (seller) {
+                response.seller = seller;
             }
         }
 
