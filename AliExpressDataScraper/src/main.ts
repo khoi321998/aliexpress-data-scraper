@@ -103,11 +103,16 @@ const crawler = new PlaywrightCrawler({
     // --- Sessions & proxy rotation --------------------------------------------------------
     // A session is tied to one sticky residential IP *and* (via the fingerprint cache) one
     // fingerprint. Reusing it a few times builds natural cookies; retiring it on a block drops
-    // the whole burned identity at once. `retryOnBlocked` adds Crawlee's built-in detection of
-    // common block responses on top of our AliExpress-specific checks in `routes.ts`.
+    // the whole burned identity at once.
+    //
+    // `retryOnBlocked` is deliberately OFF: routes.ts already detects AliExpress blocks
+    // (captcha/punish/empty) and rotates via `rotateAndRetry`. Layering Crawlee's own block
+    // detection on top caused it to reclaim+retry a request while our slow handler was still
+    // extracting, so under maxConcurrency=2 the SAME product ran in two passes at once — wasting
+    // half the run budget. We own block handling; Crawlee should not second-guess it.
     useSessionPool: true,
     persistCookiesPerSession: true,
-    retryOnBlocked: true,
+    retryOnBlocked: false,
     sessionPoolOptions: {
         maxPoolSize: config.sessionPool.maxPoolSize,
         sessionOptions: {
@@ -122,7 +127,10 @@ const crawler = new PlaywrightCrawler({
         // far less suspicious than bundled Chromium).
         useChrome: true,
         launchOptions: {
-            headless: false,
+            // Respect the resolved config (defaults to true). On production we run headless; the
+            // seller pipeline already keys off `config.headless`, so this keeps the product crawler
+            // consistent instead of hardcoding a headful browser.
+            headless: config.headless,
             args: CHROME_LAUNCH_ARGS,
         },
     },

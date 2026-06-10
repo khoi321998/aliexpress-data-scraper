@@ -124,6 +124,15 @@ export function createRouter(config: ScraperConfig) {
         // Confirm the product page is leaving via the residential proxy (expect a proxy IP here).
         await logEgressIp(page, log, 'product');
 
+        // Diagnostic: tag every pass that gets past the anti-bot gate with its request id + retry count.
+        // Two passes sharing the same requestId overlapping in time means the request is being processed
+        // concurrently (a premature retry overlapping a still-running attempt) — see `retryOnBlocked`.
+        log.info('product handler pass', {
+            requestId: request.id,
+            retryCount: request.retryCount,
+            pageUrl: page.url(),
+        });
+
         // 4b. Proactively mint the MTOP `_m_h5_tk` token now, while the page is warm and settled, so the
         //     product-reviews API call later reads a ready token and succeeds on its first attempt
         //     instead of paying the token-bootstrap dance at that point. Best-effort.
@@ -244,7 +253,7 @@ export function createRouter(config: ScraperConfig) {
         }
 
         await pushData(response);
-        log.info('extracted successfully');
+        log.info('extracted successfully', { requestId: request.id, retryCount: request.retryCount });
     });
 
     return router;

@@ -39,7 +39,7 @@ export async function extractShipping(page: Page): Promise<Shipping> {
     await page
         .locator(SHIPPING_ITEM_SELECTOR)
         .first()
-        .waitFor({ state: 'attached', timeout: 8_000 })
+        .waitFor({ state: 'attached', timeout: 4_000 })
         .catch(() => undefined);
 
     const rows = await page

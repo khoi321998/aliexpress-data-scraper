@@ -103,7 +103,7 @@ async function revealDescription(page: Page, log: Log): Promise<void> {
     if (await anchor.count().catch(() => 0)) {
         await anchor.scrollIntoViewIfNeeded({ timeout: 5_000 }).catch(() => undefined);
         await anchor.click({ timeout: 5_000 }).catch(() => undefined);
-        await page.waitForTimeout(1_200);
+        await page.waitForTimeout(800);
     }
 
     // 2. Poll for the lazy-rendered body, nudging the section into view each round (same as specs,
@@ -115,7 +115,7 @@ async function revealDescription(page: Page, log: Log): Promise<void> {
         }
         await section.scrollIntoViewIfNeeded({ timeout: 3_000 }).catch(() => undefined);
         await page.mouse.wheel(0, 400).catch(() => undefined);
-        await page.waitForTimeout(900);
+        await page.waitForTimeout(600);
     }
 
     // 3. Expand the collapsed block. Only the "View more" state expands.
@@ -125,7 +125,7 @@ async function revealDescription(page: Page, log: Log): Promise<void> {
         if (label.includes('view more')) {
             await viewMore.scrollIntoViewIfNeeded({ timeout: 3_000 }).catch(() => undefined);
             await viewMore.click({ timeout: 5_000 }).catch(() => undefined);
-            await page.waitForTimeout(800);
+            await page.waitForTimeout(500);
             log.debug('expanded description via "View more"');
         }
     }
@@ -142,7 +142,7 @@ async function waitForContent(page: Page): Promise<number> {
         if (length > 60) {
             break;
         }
-        await page.waitForTimeout(1_500);
+        await page.waitForTimeout(1_000);
     }
     return length;
 }
