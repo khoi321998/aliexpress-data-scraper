@@ -41,7 +41,17 @@ export const SLIDER_SELECTORS = [
 ];
 
 // Cloudflare interstitial / managed-challenge markers.
-const CLOUDFLARE_SELECTORS = ['#cf-challenge-running', '#challenge-form', 'iframe[src*="challenges.cloudflare.com"]'];
+export const CLOUDFLARE_SELECTORS = [
+    '#cf-challenge-running',
+    '#challenge-form',
+    'iframe[src*="challenges.cloudflare.com"]',
+];
+
+// Every DOM marker that means "this is a challenge, not a product" — the union of reCAPTCHA,
+// Alibaba slider, and Cloudflare selectors. Used by `routes.ts` to RACE challenge detection
+// against the product title so a late-injected captcha short-circuits the title wait instead
+// of stalling on it for the full timeout. (Punish is URL-based, so it is not in this DOM list.)
+export const CHALLENGE_SELECTORS = [...RECAPTCHA_SELECTORS, ...SLIDER_SELECTORS, ...CLOUDFLARE_SELECTORS];
 
 // Candidate selectors for the product title, in priority order. AliExpress has shipped several
 // PDP layouts, so we fall through older/newer markup before giving up. Exported because both

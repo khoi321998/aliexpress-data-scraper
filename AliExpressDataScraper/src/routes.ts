@@ -5,7 +5,7 @@ import type { Page } from 'playwright';
 
 import type { ScraperConfig } from './config.js';
 import { extractDescription } from './description.js';
-import { classifyPage, isProductLoaded, TITLE_SELECTORS } from './detection.js';
+import { CHALLENGE_SELECTORS, classifyPage, isProductLoaded, TITLE_SELECTORS } from './detection.js';
 import { simulateBrowsing } from './humanize.js';
 import { logEgressIp } from './ip.js';
 import { extractMedia } from './media.js';
@@ -103,20 +103,36 @@ export function createRouter(config: ScraperConfig) {
             rotateAndRetry(ctx, status);
         }
 
-        // 2. Wait for real product markup, then let the client hydrate. We never use
-        //    `networkidle` (AliExpress keeps long-lived connections open, so it rarely fires);
-        //    the pre-navigation hook already pinned `domcontentloaded`.
-        await page.waitForSelector(TITLE_SELECTORS.join(', '), { timeout: 30_000 }).catch(() => undefined);
+        // 2. Wait for EITHER real product markup OR a challenge to render — whichever appears
+        //    first. AliExpress injects its slider/reCAPTCHA a beat after `domcontentloaded`, so a
+        //    blind 30s wait for the title would stall on every late challenge before we ever got
+        //    to re-classify. Racing the two means a challenge short-circuits the wait the moment
+        //    it renders. We never use `networkidle` (AliExpress keeps long-lived connections open,
+        //    so it rarely fires); the pre-navigation hook already pinned `domcontentloaded`.
+        await Promise.race([
+            page.waitForSelector(TITLE_SELECTORS.join(', '), { timeout: 30_000 }).catch(() => null),
+            page.waitForSelector(CHALLENGE_SELECTORS.join(', '), { timeout: 30_000 }).catch(() => null),
+        ]);
+
+        // 3. Re-classify BEFORE spending the hydration + humanization budget. A hard block
+        //    (captcha/punish/blocked) that rendered late is rotated right here, so we never waste
+        //    ~5–8s scrolling a challenge page. `empty` is given the benefit of the doubt — a
+        //    slow-hydrating real product also looks empty for a moment — and re-checked in step 5.
+        status = await classifyPage(page);
+        if (status === 'captcha' || status === 'punish' || status === 'blocked') {
+            rotateAndRetry(ctx, status);
+        }
+
+        // 4. Real product (or a still-empty shell): let the client hydrate, then behave like a
+        //    person skimming the page (also forces lazy content to render).
         const { minHydrationDelayMs, maxHydrationDelayMs } = config.humanize;
         await page.waitForTimeout(minHydrationDelayMs + Math.random() * (maxHydrationDelayMs - minHydrationDelayMs));
-
-        // 3. Behave like a person skimming the page (also forces lazy content to render).
         await simulateBrowsing(page, config);
 
-        // 4. A late challenge can appear after hydration; re-classify once before trusting it.
+        // 5. A late challenge can still appear after hydration + scroll; final check before we
+        //    trust the page. `empty` here (after a full load + scroll) is a soft block — rotate.
         status = await classifyPage(page);
         if (status !== 'ok') {
-            // `empty` after a full load + scroll is a soft block; rotate like a hard one.
             rotateAndRetry(ctx, status);
         }
 
