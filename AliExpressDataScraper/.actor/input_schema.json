@@ -43,7 +43,7 @@
             "title": "Max Request Retries",
             "type": "integer",
             "description": "How many times a blocked request is retried. Each retry rotates to a fresh session (new residential IP + fingerprint), so give rotation room to find a clean IP.",
-            "default": 5,
+            "default": 10,
             "minimum": 0,
             "maximum": 15
         },

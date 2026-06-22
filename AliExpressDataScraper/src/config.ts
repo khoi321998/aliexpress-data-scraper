@@ -106,7 +106,7 @@ export function buildConfig(input: ScraperInput): ScraperConfig {
         mode,
         maxRequestsPerCrawl: asPositiveInt(input.maxRequestsPerCrawl, 10),
         maxConcurrency,
-        maxRequestRetries: asPositiveInt(input.maxRequestRetries, 5),
+        maxRequestRetries: asPositiveInt(input.maxRequestRetries, 10),
         navigationTimeoutSecs: 45,
         // 6 minutes: covers product extraction PLUS the `product_and_seller` seller scrape, which runs
         // in a separate local browser and may include a 2captcha solve (up to ~5 min) on the store pages.
