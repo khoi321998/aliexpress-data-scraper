@@ -1,14 +1,13 @@
-// Product shipping extraction — the delivery options from the AliExpress PDP service panel.
+// Product shipping extraction — the delivery-time label from the AliExpress PDP service panel.
 //
 // The right-side action panel lists service rows in `[class*="shipping--item"]`. The shipping
-// row renders a title (e.g. "Free shipping") plus a "Delivery: <date>" line; the other rows in
-// the same container describe return/security policies (handled in `condition.ts`, not here).
+// row renders a title (e.g. "Free shipping") plus a "Delivery: <date>" line.
 //
 // Class names are content-hashed per build, so we match on the stable `shipping--item` prefix
-// and parse the title / delivery text out of each row's text ourselves.
+// and parse the delivery text out of each row's text ourselves.
 import type { Page } from 'playwright';
 
-import type { Shipping, ShippingOption } from './types.js';
+import type { Shipping } from './types.js';
 
 const SHIPPING_ITEM_SELECTOR = '[class*="shipping--item"]';
 
@@ -25,13 +24,11 @@ function normalizeLines(text: string): string {
 }
 
 /**
- * Extract shipping options + the delivery-time label from the service panel.
+ * Extract the delivery-time label from the service panel.
  *
- * Walks every `shipping--item` row, keeps the one that describes shipping (its first line
- * mentions "shipping"), and records it as a {@link ShippingOption}: cost `0` when the row says
- * "free", otherwise `null` (the panel does not show a numeric shipping fee here). The
- * estimated-days fields stay null — the page only gives a free-text date ("Jun. 26"), which we
- * surface verbatim as `deliveryTimeText` rather than guessing day ranges.
+ * Walks every `shipping--item` row and surfaces the first "Delivery: <date>" value verbatim as
+ * `deliveryTimeText` — the page only gives a free-text date ("Jun. 26"), so we surface it as-is
+ * rather than guessing day ranges. Best-effort: an absent panel yields a null label.
  */
 export async function extractShipping(page: Page): Promise<Shipping> {
     // The service panel is rendered asynchronously — give the shipping rows a moment to mount
@@ -47,22 +44,10 @@ export async function extractShipping(page: Page): Promise<Shipping> {
         .allTextContents()
         .catch(() => [] as string[]);
 
-    const options: ShippingOption[] = [];
     let deliveryTimeText: string | null = null;
 
     for (const raw of rows) {
         const text = normalizeLines(raw);
-        const firstLine = text.split('\n')[0] ?? '';
-
-        if (/shipping/i.test(firstLine)) {
-            options.push({
-                name: firstLine,
-                cost: /free/i.test(firstLine) ? 0 : null,
-                currency: '',
-                estimatedDeliveryMinDays: null,
-                estimatedDeliveryMaxDays: null,
-            });
-        }
 
         if (!deliveryTimeText) {
             const match = DELIVERY_RE.exec(text);
@@ -72,5 +57,5 @@ export async function extractShipping(page: Page): Promise<Shipping> {
         }
     }
 
-    return { options, deliveryTimeText };
+    return { deliveryTimeText };
 }

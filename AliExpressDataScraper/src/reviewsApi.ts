@@ -69,12 +69,10 @@ function toSample(raw: unknown): ReviewSample {
         userFeedbackScore: null,
         comment: toStr(r.buyerFeedback) ?? '',
         commentTranslated: toStr(r.buyerTranslationFeedback),
-        country: toStr(r.buyerCountry),
         commentDate: toStr(r.evalDate) ?? '',
         rating: eval100 != null ? Math.round(eval100 / 20) : null,
         // AliExpress only surfaces reviews from confirmed buyers; `reviewType === 'REVIEW'` flags those.
         verifiedPurchase: r.reviewType === 'REVIEW',
-        sku: toStr(r.skuInfo),
         // Main photos plus any attached to a later "additional" feedback edit.
         images: [...toImageList(r.images), ...toImageList(r.buyerAddFbImages)],
     };
@@ -101,24 +99,11 @@ export function parseProductReviews(res: unknown): ReviewsSummary | null {
 
     const reviewSamples = Array.isArray(data.evaViewList) ? data.evaViewList.map(toSample) : [];
 
-    const authenticityKeywords = Array.isArray(data.impressionDTOList)
-        ? data.impressionDTOList.map((i) => toStr(asRecord(i).content)).filter((s): s is string => s !== null)
-        : [];
-
-    // "reviews carrying photos" count, read from the `image` filter bucket.
-    const filterStats = asRecord(data.filterInfo).filterStatistic;
-    const imageStat = Array.isArray(filterStats)
-        ? filterStats.find((f) => asRecord(f).filterCode === 'image')
-        : undefined;
-    const buyerImageCount = imageStat ? toNumber(asRecord(imageStat).filterCount) : null;
-
     return {
         rating: toNumber(stat.evarageStar),
         reviewCount: toNumber(stat.totalNum),
         ratingBreakdown,
         reviewSamples,
-        authenticityKeywords,
-        buyerMediaCounts: { images: buyerImageCount ?? 0, videos: 0 },
     };
 }
 

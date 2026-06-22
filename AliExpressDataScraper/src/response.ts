@@ -58,13 +58,7 @@ export function createAliExpressResponse(url: string): ProductSellerResponse & {
                 availableQuantity: null,
                 soldCount: null,
             },
-            condition: {
-                conditionText: null,
-                returnPolicySummary: null,
-                guaranteeLabels: [],
-            },
             shipping: {
-                options: [],
                 deliveryTimeText: null,
             },
             paymentMethods: [],
@@ -82,8 +76,6 @@ export function createAliExpressResponse(url: string): ProductSellerResponse & {
                 reviewCount: null,
                 ratingBreakdown: { '1': 0, '2': 0, '3': 0, '4': 0, '5': 0 },
                 reviewSamples: [],
-                authenticityKeywords: [],
-                buyerMediaCounts: { images: 0, videos: 0 },
             },
         },
         sellerRef: null,

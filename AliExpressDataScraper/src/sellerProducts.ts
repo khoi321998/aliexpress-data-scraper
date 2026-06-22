@@ -77,24 +77,6 @@ export function parseMoney(text: string | null): number | null {
     return Number.isFinite(n) ? n : null;
 }
 
-/** Pull the first integer out of a string (commas/dots stripped), e.g. "1,000+ sold" → 1000. */
-function parseCount(text: string | null): number | null {
-    if (!text) {
-        return null;
-    }
-    const match = text.replace(/[.,]/g, '').match(/\d+/);
-    return match ? Number(match[0]) : null;
-}
-
-/** Parse the discount magnitude as a positive percent, e.g. "-50%" → 50. */
-function parseDiscountPercent(text: string | null): number | null {
-    if (!text) {
-        return null;
-    }
-    const match = text.match(/(\d+)\s*%/);
-    return match ? Number(match[1]) : null;
-}
-
 /**
  * Extract up to `limit` of the seller's other-product previews from the PDP recommendation strip.
  *
@@ -146,21 +128,12 @@ export async function extractSellerProductPreviews(page: Page, log?: Log, limit 
         .catch(() => [] as RawPreview[]);
 
     const previews = raw.slice(0, limit).map((card) => {
-        const url = ensureAbsolute(card.href);
-        const priceText = clean(card.priceText);
-        const originalPriceText = clean(card.originalPriceText);
         return {
             productId: card.href ? extractAliExpressItemId(card.href) : null,
             title: clean(card.title),
-            url,
+            url: ensureAbsolute(card.href),
             imageUrl: ensureAbsolute(card.image),
-            price: parseMoney(priceText),
-            priceText,
-            originalPrice: parseMoney(originalPriceText),
-            originalPriceText,
-            discountPercent: parseDiscountPercent(card.discountText),
-            soldCount: parseCount(card.soldText),
-            soldText: clean(card.soldText),
+            price: parseMoney(clean(card.priceText)),
         };
     });
 
@@ -268,25 +241,12 @@ export async function extractStoreAllItemsPreviews(page: Page, log?: Log, limit 
             seen.add(productId);
         }
 
-        const priceText = clean(card.priceText);
-        const originalPriceText = clean(card.originalPriceText);
-        const price = parseMoney(priceText);
-        const originalPrice = parseMoney(originalPriceText);
-        const discountPercent =
-            price != null && originalPrice != null && originalPrice > 0 ? Math.round((1 - price / originalPrice) * 100) : null;
-
         previews.push({
             productId,
             title: clean(card.title),
             url: ensureAbsolute(card.href),
             imageUrl: ensureAbsolute(card.image),
-            price,
-            priceText,
-            originalPrice,
-            originalPriceText,
-            discountPercent,
-            soldCount: parseCount(card.soldText),
-            soldText: clean(card.soldText),
+            price: parseMoney(clean(card.priceText)),
         });
 
         if (previews.length >= limit) break;

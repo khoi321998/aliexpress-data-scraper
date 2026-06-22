@@ -32,7 +32,6 @@ export interface Product {
     brand: string | null;
     pricing: Pricing;
     stock: Stock;
-    condition: Condition;
     shipping: Shipping;
     paymentMethods: string[];
     description: Description;
@@ -53,23 +52,8 @@ export interface Stock {
     soldCount: number | null;
 }
 
-export interface Condition {
-    conditionText: string | null;
-    returnPolicySummary: string | null;
-    guaranteeLabels: string[];
-}
-
 export interface Shipping {
-    options: ShippingOption[];
     deliveryTimeText: string | null;
-}
-
-export interface ShippingOption {
-    name: string;
-    cost: number | null;
-    currency: string;
-    estimatedDeliveryMinDays: number | null;
-    estimatedDeliveryMaxDays: number | null;
 }
 
 export interface Description {
@@ -103,8 +87,6 @@ export interface ReviewsSummary {
     ratingBreakdown: RatingBreakdown;
     /** Sample reviews as shown on the page, each carrying its own star `rating`. */
     reviewSamples: ReviewSample[];
-    authenticityKeywords: string[];
-    buyerMediaCounts: BuyerMediaCounts;
 }
 
 export interface RatingBreakdown {
@@ -121,22 +103,13 @@ export interface ReviewSample {
     comment: string;
     /** English machine-translation of {@link comment}, when the review was written in another language. */
     commentTranslated?: string | null;
-    /** ISO-3166 country code of the reviewer, e.g. "BR" (from the reviews API). */
-    country?: string | null;
     /** Free-text recency label as shown on the page, e.g. "Past 6 months". */
     commentDate: string;
     /** Star rating of this individual review (1–5), when shown. The only sentiment signal AliExpress exposes. */
     rating: number | null;
     verifiedPurchase: boolean;
-    /** The variant the reviewer bought, e.g. "Color:Rice white Nylon". */
-    sku: string | null;
     /** Buyer-uploaded photo URLs attached to this review. */
     images: string[];
-}
-
-export interface BuyerMediaCounts {
-    images: number;
-    videos: number;
 }
 
 /** Lightweight pointer to a seller (id/handle) without the full profile. */
@@ -153,30 +126,19 @@ export interface SellerProductPreview {
     title: string | null;
     url: string | null;
     imageUrl: string | null;
-    /** Current price as a number, plus the exact string shown on the card. */
+    /** Current price as a number. */
     price: number | null;
-    priceText: string | null;
-    originalPrice: number | null;
-    originalPriceText: string | null;
-    /** Discount magnitude as a positive percentage (e.g. 50 for "-50%"). */
-    discountPercent: number | null;
-    soldCount: number | null;
-    soldText: string | null;
 }
 
 /**
  * A single seller-store review — the lean subset shown on the store's "Customer reviews" panel:
- * variant bought, reviewer, country, date, star rating, the comment, and any buyer photos.
+ * reviewer, date, star rating, the comment, and any buyer photos.
  * Deliberately narrower than {@link ReviewSample} (no feedback score / verified flag) since the
  * seller endpoint only surfaces these display fields.
  */
 export interface SellerReviewSample {
     /** Reviewer's masked display name, e.g. "A***z". */
     user: string;
-    /** ISO-3166 country code of the reviewer, e.g. "MX". */
-    country: string | null;
-    /** The variant the reviewer bought, e.g. "Metal Color:3-Gold". */
-    sku: string | null;
     /** Star rating of this review (1–5), when shown. */
     rating: number | null;
     /** Date shown on the review, e.g. "14 Aug 2025". */

@@ -3,7 +3,6 @@ import { createPlaywrightRouter } from '@crawlee/playwright';
 import type { Log } from 'apify';
 import type { Page } from 'playwright';
 
-import { extractCondition } from './condition.js';
 import type { ScraperConfig } from './config.js';
 import { extractDescription } from './description.js';
 import { classifyPage, isProductLoaded, TITLE_SELECTORS } from './detection.js';
@@ -216,14 +215,7 @@ export function createRouter(config: ScraperConfig) {
 
         response.product.shipping = await extractShipping(page);
         log.info('shipping extracted', {
-            options: response.product.shipping.options.length,
             deliveryTimeText: response.product.shipping.deliveryTimeText,
-        });
-
-        response.product.condition = await extractCondition(page);
-        log.info('condition extracted', {
-            returnPolicySummary: response.product.condition.returnPolicySummary,
-            guaranteeLabels: response.product.condition.guaranteeLabels.length,
         });
 
         // Reviews — fetched from the product reviews API (`mtop.aliexpress.review.pc.list`), which gives

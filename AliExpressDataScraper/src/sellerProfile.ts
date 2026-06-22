@@ -57,7 +57,6 @@ export function buildSellerDto(
         url: `https://www.aliexpress.com/store/${storeId}`,
         positiveFeedbackPercent: feedback.positiveFeedbackPercent,
         feedbackScore: feedback.totalCount,
-        countryName: feedback.countryName,
         openedSinceText: feedback.openedSinceText,
         reviewCounts: {
             positive: feedback.positiveCount,

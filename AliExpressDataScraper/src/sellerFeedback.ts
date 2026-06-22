@@ -269,12 +269,13 @@ function toSample(raw: RawReview, rating: number): SellerReviewSample {
         .map((p) => p.trim())
         .filter(Boolean);
     const commentDate = parts.pop() ?? '';
-    const country = parts.length >= 2 ? (parts.pop() ?? null) : null;
+    // Drop the country segment (no longer surfaced) so it isn't folded into `user`.
+    if (parts.length >= 2) {
+        parts.pop();
+    }
     const user = parts.join(', ');
     return {
         user,
-        country,
-        sku: raw.skuText,
         rating,
         commentDate,
         comment: raw.comment,
