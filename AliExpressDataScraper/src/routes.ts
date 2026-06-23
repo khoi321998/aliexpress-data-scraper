@@ -55,6 +55,14 @@ async function dumpPageDiagnostics(page: Page, log: Log): Promise<void> {
 }
 
 /**
+ * Per-run tally of how many times we rotated the session because of an anti-bot block, keyed by
+ * reason (`captcha`, `punish`, `blocked`, `empty-product`, ...). Each entry counts one actual
+ * block-and-retry event — unlike Crawlee's `requestsRetries`, which only counts +1 per request no
+ * matter how many times it was retried. Read this after `crawler.run()` for the true captcha tally.
+ */
+export const rotationStats: Record<string, number> = {};
+
+/**
  * Retire the current session and throw so Crawlee retries the request on a fresh session
  * (which, with the session pool + residential proxy, means a new sticky IP and a new
  * fingerprint). This is the core of the rotate-first anti-bot strategy.
@@ -63,6 +71,7 @@ function rotateAndRetry(
     { session, request, log }: Pick<PlaywrightCrawlingContext, 'session' | 'request' | 'log'>,
     reason: string,
 ): never {
+    rotationStats[reason] = (rotationStats[reason] ?? 0) + 1;
     log.warning(`Block detected — rotating session and retrying.`, {
         reason,
         url: request.url,

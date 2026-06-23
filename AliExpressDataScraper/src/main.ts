@@ -8,9 +8,10 @@ import { Actor, log } from 'apify';
 import type { ScraperInput } from './config.js';
 // this is an ESM project, so relative imports must include the `.js` extension even from TS.
 import { buildConfig } from './config.js';
-import { createRouter } from './routes.js';
+import { logEgressIp } from './ip.js';
+import { createRouter, rotationStats } from './routes.js';
 import { runSellerOnly } from './sellerPipeline.js';
-import { applyRegionOverrides, applyStealthInitScript, CHROME_LAUNCH_ARGS, FINGERPRINT_OPTIONS } from './stealth.js';
+import { applyRegionOverrides, applyStealthInitScript, CHROME_LAUNCH_ARGS, FINGERPRINT_OPTIONS, readBrowserIdentity } from './stealth.js';
 import { normalizeAliExpressUrl } from './url.js';
 
 // Load a local `.env` (e.g. TWOCAPTCHA_API_KEY) for local runs. On the Apify platform these
@@ -85,6 +86,11 @@ log.info(`Using Apify residential proxy (RESIDENTIAL, country ${config.proxyCoun
 // burned session and retries on a fresh residential IP + fingerprint. We never solve captchas.
 log.info('Anti-bot strategy: rotate (blocks retire the session and retry on a fresh IP/fingerprint).');
 
+// Track which browsers we've already logged a fingerprint for, so `postPageCreateHooks` (which runs
+// once per page) emits the identity only on the FIRST page of each browser — i.e. once per browser
+// start. A fresh browser means a freshly minted fingerprint (see `retireBrowserAfterPageCount`).
+const loggedBrowsers = new WeakSet<object>();
+
 const crawler = new PlaywrightCrawler({
     proxyConfiguration,
     requestHandler: createRouter(config),
@@ -144,6 +150,25 @@ const crawler = new PlaywrightCrawler({
         },
         // Recycle the browser every few pages so a fresh fingerprint is minted periodically.
         retireBrowserAfterPageCount: config.retireBrowserAfterPageCount,
+        // Log the effective fingerprint once per browser start. The first page created on a browser
+        // carries that browser's freshly minted identity; we apply the US region overrides first so
+        // the logged timezone/locale match exactly what AliExpress will see (the injector spoofs
+        // UA/navigator/headers but not timezone — that comes from `applyRegionOverrides`).
+        postPageCreateHooks: [
+            async (page, browserController) => {
+                if (loggedBrowsers.has(browserController)) {
+                    return;
+                }
+                loggedBrowsers.add(browserController);
+                await applyRegionOverrides(page);
+                const identity = await readBrowserIdentity(page);
+                log.info('Browser started — fingerprint identity', identity ?? { error: 'unavailable' });
+                // Log the egress IP for THIS browser/session too, so every rotation shows both a new
+                // fingerprint AND the IP it leaves from. Comparing IPs across "Browser started" lines is
+                // the proof that retiring a blocked session actually moved us to a fresh residential IP.
+                await logEgressIp(page, log, 'browser-start');
+            },
+        ],
     },
 
     // --- Navigation strategy --------------------------------------------------------------
@@ -182,10 +207,13 @@ const crawler = new PlaywrightCrawler({
 
 await crawler.run(requests);
 
-// Surface the total number of retries across the whole run. 0 means every URL succeeded on the
-// first attempt (no rotation needed) — a quick health signal for how aggressively AliExpress is
-// blocking us.
-log.info(`Total retried: ${crawler.stats.state.requestsRetries}`);
+// Surface how many times we hit an anti-bot block and rotated/retried, broken down by reason.
+// This counts every block-and-retry event (e.g. each captcha), not just how many requests were
+// retried — a true health signal for how aggressively AliExpress is blocking us. 0 across the
+// board means every URL passed on the first attempt.
+const captchaRetries = rotationStats.captcha ?? 0;
+const totalBlockRetries = Object.values(rotationStats).reduce((sum, n) => sum + n, 0);
+log.info(`Captcha retries: ${captchaRetries}`, { byReason: rotationStats, totalBlockRetries });
 
 // It's recommended to quit every Actor with an explicit exit().
 await Actor.exit();
