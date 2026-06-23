@@ -19,7 +19,7 @@ import type { Page } from 'playwright';
  */
 export async function logEgressIp(page: Page, log: Log, label: string): Promise<void> {
     try {
-        const res = await page.context().request.get('https://api.ipify.org?format=json', { timeout: 15_000 });
+        const res = await page.context().request.get('https://api.ipify.org?format=json', { timeout: 4_000 });
         const body = (await res.json()) as { ip?: string };
         log.info(`🌍 egress IP (${label})`, { ip: body.ip ?? null });
     } catch (error) {

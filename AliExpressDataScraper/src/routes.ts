@@ -146,7 +146,9 @@ export function createRouter(config: ScraperConfig) {
         }
 
         // Confirm the product page is leaving via the residential proxy (expect a proxy IP here).
-        await logEgressIp(page, log, 'product');
+        // Fire-and-forget: this is pure diagnostics and never throws, so we don't block the handler
+        // on it — the IP line just lands a moment later in the log.
+        void logEgressIp(page, log, 'product');
 
         // Diagnostic: tag every pass that gets past the anti-bot gate with its request id + retry count.
         // Two passes sharing the same requestId overlapping in time means the request is being processed

@@ -60,9 +60,10 @@ async function readToken(page: Page): Promise<string> {
  * `ReferenceError: __name is not defined` in the browser. A plain string is shipped verbatim, so it
  * sidesteps that transform entirely. `url`/`callback` are interpolated as JSON literals.
  */
-async function jsonpInPage(page: Page, url: string): Promise<unknown> {
+async function jsonpInPage(page: Page, url: string, timeoutMs = 20_000): Promise<unknown> {
     const cb = JSON.stringify(CALLBACK);
     const src = JSON.stringify(url);
+    const ms = JSON.stringify(timeoutMs);
     const expr = `new Promise(function (resolve, reject) {
         var w = window;
         var script = document.createElement('script');
@@ -70,7 +71,7 @@ async function jsonpInPage(page: Page, url: string): Promise<unknown> {
             try { delete w[${cb}]; } catch (e) { w[${cb}] = undefined; }
             script.remove();
         }
-        var timer = window.setTimeout(function () { cleanup(); reject(new Error('jsonp timeout')); }, 20000);
+        var timer = window.setTimeout(function () { cleanup(); reject(new Error('jsonp timeout')); }, ${ms});
         w[${cb}] = function (data) { window.clearTimeout(timer); cleanup(); resolve(data); };
         script.onerror = function () { window.clearTimeout(timer); cleanup(); reject(new Error('jsonp network error')); };
         script.src = ${src};
@@ -177,7 +178,9 @@ export async function primeMtopToken(page: Page, log: Log): Promise<boolean> {
     const req = buildRequest(PRODUCT_REVIEWS_API, '1.0', data, '');
     log.info('MTOP token prime — request', { appKey: req.appKey, token: req.token, t: req.t, sign: req.sign, url: req.url });
     try {
-        await jsonpInPage(page, req.url);
+        // Short timeout: priming is best-effort and the reviews call's own token dance covers a miss,
+        // so we never want to block the handler for the full JSONP budget just to warm the cookie.
+        await jsonpInPage(page, req.url, 6_000);
     } catch (error) {
         log.warning('MTOP token prime — JSONP failed (will fall back to in-loop dance).', {
             error: error instanceof Error ? error.message : String(error),

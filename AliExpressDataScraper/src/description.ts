@@ -95,6 +95,34 @@ async function descriptionContentLength(page: Page): Promise<number> {
 }
 
 /**
+ * Whether ANY content-host element exists yet (light DOM or shadow/template scopes), regardless of
+ * whether it has streamed its body in. A real description mounts its host early (an empty `<div>`)
+ * then streams content — so a *missing* host after we've revealed the section is a strong signal the
+ * product simply has no description, letting us bail instead of polling the full wait budget.
+ */
+async function hasContentHost(page: Page): Promise<boolean> {
+    return page
+        .evaluate((sel) => {
+            const section = document.querySelector('#nav-description, [class*="description--wrap"]');
+            const scopes: (Document | ShadowRoot | DocumentFragment)[] = [document];
+            if (section) {
+                for (const el of Array.from(section.querySelectorAll<HTMLElement>('*'))) {
+                    if (el.shadowRoot) {
+                        scopes.push(el.shadowRoot);
+                    }
+                }
+                for (const tpl of Array.from(section.querySelectorAll('template'))) {
+                    if ((tpl as HTMLTemplateElement).content) {
+                        scopes.push((tpl as HTMLTemplateElement).content);
+                    }
+                }
+            }
+            return scopes.some((scope) => scope.querySelector(sel) !== null);
+        }, CONTENT_SELECTOR)
+        .catch(() => false);
+}
+
+/**
  * Bring the description section into view and fully expand it. Mirror of `revealSpecifications`.
  */
 async function revealDescription(page: Page, log: Log): Promise<void> {
@@ -137,12 +165,17 @@ async function revealDescription(page: Page, log: Log): Promise<void> {
  */
 async function waitForContent(page: Page): Promise<number> {
     let length = 0;
-    for (let attempt = 0; attempt < 8; attempt += 1) {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
         length = await descriptionContentLength(page);
         if (length > 60) {
             break;
         }
-        await page.waitForTimeout(1_000);
+        // Early exit: if not even an empty content host has mounted by now, the body is never going
+        // to stream in — this product has no description. Stop instead of burning the full budget.
+        if (!(await hasContentHost(page))) {
+            break;
+        }
+        await page.waitForTimeout(700);
     }
     return length;
 }
