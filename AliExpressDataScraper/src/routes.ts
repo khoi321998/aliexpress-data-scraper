@@ -221,7 +221,8 @@ export function createRouter(config: ScraperConfig) {
         response.product.pricing = await extractPricing(page);
         log.info('pricing extracted', {
             currency: response.product.pricing.currency,
-            price: response.product.pricing.price,
+            priceMin: response.product.pricing.priceMin,
+            priceMax: response.product.pricing.priceMax,
         });
 
         // Specifications — name/value table (expanded via "View more").

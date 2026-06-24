@@ -88,10 +88,13 @@ export function parsePrice(text: string): number | null {
 }
 
 /**
- * Extract the headline price from the PDP price block.
+ * Extract the price range from the PDP price block.
  *
- * Reads the current-price text, parses out the currency and numeric amount, and leaves
- * `priceMin`/`priceMax` null (those describe variant ranges, populated elsewhere).
+ * Reads the current-price text from a single selector and parses out the currency and numeric
+ * amount(s). AliExpress renders a range (`₫1,000 - ₫2,000`) in this same element when a product
+ * has SKU variants at different prices, and a single value otherwise — so `priceMin`/`priceMax`
+ * both come from this one selector: the two ends of the range, or the same value when there's no
+ * range.
  */
 export async function extractPricing(page: Page): Promise<Pricing> {
     const text = await page
@@ -101,10 +104,20 @@ export async function extractPricing(page: Page): Promise<Pricing> {
         .catch(() => null);
 
     const raw = text?.trim() ?? '';
+
+    // Split a range like `₫1,000 - ₫2,000` on the separating dash (en/em dash or hyphen). A lone
+    // value yields a single part used for both ends.
+    const parts = raw
+        .split(/\s[-–—]\s/)
+        .map((part) => parsePrice(part))
+        .filter((value): value is number => value !== null);
+
+    const priceMin = parts.length > 0 ? Math.min(...parts) : null;
+    const priceMax = parts.length > 0 ? Math.max(...parts) : null;
+
     return {
         currency: parseCurrency(raw) ?? '',
-        price: parsePrice(raw),
-        priceMin: null,
-        priceMax: null,
+        priceMin,
+        priceMax,
     };
 }

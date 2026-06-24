@@ -50,7 +50,6 @@ export function createAliExpressResponse(url: string): ProductSellerResponse & {
             brand: null,
             pricing: {
                 currency: '',
-                price: null,
                 priceMin: null,
                 priceMax: null,
             },

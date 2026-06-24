@@ -42,7 +42,6 @@ export interface Product {
 
 export interface Pricing {
     currency: string;
-    price: number | null;
     priceMin: number | null;
     priceMax: number | null;
 }
