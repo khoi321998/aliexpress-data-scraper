@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 import { buildConfig } from '../src/config.js';
 import { classifyPage, isPunishUrl } from '../src/detection.js';
+import { parsePdpResult } from '../src/productApi.js';
 import { extractAliExpressItemId, normalizeAliExpressUrl } from '../src/url.js';
 
 describe('url normalization', () => {
@@ -36,7 +37,7 @@ describe('config defaults', () => {
     it('applies safe production defaults', () => {
         const config = buildConfig({});
         expect(config.maxConcurrency).toBe(2);
-        expect(config.maxRequestRetries).toBe(5);
+        expect(config.maxRequestRetries).toBe(10);
         expect(config.headless).toBe(true);
         expect(config.proxyCountry).toBe('US');
         // The whole-request budget must comfortably exceed a single navigation.
@@ -48,6 +49,65 @@ describe('config defaults', () => {
         expect(config.proxyCountry).toBe('DE');
         expect(config.headless).toBe(false);
         expect(config.maxConcurrency).toBe(3);
+    });
+});
+
+describe('pdp.pc.query parsing', () => {
+    // A minimal `result` mirroring the real module shapes (see productApi.ts field map).
+    const result = {
+        PRODUCT_TITLE: { text: '  Fancy Shoes  ' },
+        PRICE: {
+            targetSkuPriceInfo: { originalPrice: { currency: 'USD' }, salePriceString: '$29.12' },
+            skuPriceInfoMap: {
+                a: { salePriceString: '$29.12' },
+                b: { salePriceString: '$32.49' },
+            },
+        },
+        HEADER_IMAGE_PC: {
+            imagePathList: ['//ae.com/a.jpg', 'http://ae.com/b.jpg'],
+            productVideo: { posterUrl: '//ae.com/p.jpg', videoPlayInfo: { webUrl: 'https://v.com/x.mp4' } },
+        },
+        PRODUCT_PROP_PC: {
+            showedProps: [
+                { attrName: 'Color', attrValue: 'Silver' },
+                { attrName: '', attrValue: 'dropme' },
+            ],
+        },
+        QUANTITY_PC: { totalAvailableInventory: 717 },
+        PC_RATING: { rating: '5.0', totalValidNum: 105, otherText: '236 sold' },
+        SHIPPING: {
+            deliveryLayoutInfo: [{ additionLayout: [{ content: '<strong>Delivery: Jul 02 - 09</strong>' }] }],
+        },
+        SHOP_CARD_PC: { storeName: 'Aneikeh Shoes Store', sellerInfo: { adminSeq: 2671658649, storeURL: '//www.aliexpress.com/store/1102738107' } },
+        DESC: { pcDescUrl: 'https://pdp.aliexpress-media.com/desc.htm?x=1' },
+    };
+
+    it('maps every product field from one result object', () => {
+        const p = parsePdpResult(result);
+        expect(p.title).toBe('Fancy Shoes');
+        expect(p.pricing).toEqual({ currency: 'USD', priceMin: 29.12, priceMax: 32.49 });
+        expect(p.media.images.map((i) => i.url)).toEqual(['https://ae.com/a.jpg', 'https://ae.com/b.jpg']);
+        expect(p.media.videos[0]).toEqual({ url: 'https://v.com/x.mp4', poster: 'https://ae.com/p.jpg' });
+        expect(p.specifications).toEqual([{ name: 'Color', value: 'Silver' }]);
+        expect(p.stock).toEqual({ availableQuantity: 717, soldCount: 236 });
+        expect(p.shipping.deliveryTimeText).toBe('Jul 02 - 09');
+        expect(p.ratingFallback).toEqual({ rating: 5, reviewCount: 105 });
+        expect(p.sellerRef).toEqual({
+            platformSellerId: '2671658649',
+            name: 'Aneikeh Shoes Store',
+            url: 'https://www.aliexpress.com/store/1102738107',
+        });
+        expect(p.descUrl).toBe('https://pdp.aliexpress-media.com/desc.htm?x=1');
+    });
+
+    it('degrades gracefully on an empty result', () => {
+        const p = parsePdpResult({});
+        expect(p.title).toBeNull();
+        expect(p.pricing).toEqual({ currency: '', priceMin: null, priceMax: null });
+        expect(p.media.images).toEqual([]);
+        expect(p.specifications).toEqual([]);
+        expect(p.sellerRef).toBeNull();
+        expect(p.descUrl).toBeNull();
     });
 });
 

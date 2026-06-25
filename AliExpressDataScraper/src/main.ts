@@ -8,10 +8,10 @@ import { Actor, log } from 'apify';
 import type { ScraperInput } from './config.js';
 // this is an ESM project, so relative imports must include the `.js` extension even from TS.
 import { buildConfig } from './config.js';
-import { logEgressIp } from './ip.js';
+import { armPdpInterceptor } from './productApi.js';
 import { createRouter, rotationStats } from './routes.js';
 import { runSellerOnly } from './sellerPipeline.js';
-import { applyRegionOverrides, applyStealthInitScript, CHROME_LAUNCH_ARGS, FINGERPRINT_OPTIONS, readBrowserIdentity } from './stealth.js';
+import { applyRegionOverrides, applyStealthInitScript, CHROME_LAUNCH_ARGS, FINGERPRINT_OPTIONS } from './stealth.js';
 import { normalizeAliExpressUrl } from './url.js';
 
 // Load a local `.env` (e.g. TWOCAPTCHA_API_KEY) for local runs. On the Apify platform these
@@ -73,14 +73,14 @@ if (!productUrls.length) {
 }
 const requests = productUrls.map((url) => ({ url }));
 
-// AliExpress blocks datacenter IPs hard, so we route through Apify residential proxy. `checkAccess`
-// is intentionally omitted so a local run (where proxy access can't be verified up front) doesn't
-// throw — it just egresses from the local IP if the proxy is unavailable.
+// TEST: Apify DATACENTER proxy (default automatic pool — no groups), matching the rented Actor's
+// `proxy: {useApifyProxy: true}`. Datacenter is far lower-latency than residential, so each attempt
+// is cheap; we accept a higher block rate and lean on fast rotate-and-retry. Revert to
+// `{ groups: ['RESIDENTIAL'], countryCode: config.proxyCountry }` for the clean residential path.
 const proxyConfiguration = await Actor.createProxyConfiguration({
-    groups: ['RESIDENTIAL'],
     countryCode: config.proxyCountry,
 });
-log.info(`Using Apify residential proxy (RESIDENTIAL, country ${config.proxyCountry}).`);
+log.info(`Using Apify datacenter proxy (auto, country ${config.proxyCountry}).`);
 
 // Anti-bot strategy is avoidance + rotation only: a captcha/punish/blocked page retires the
 // burned session and retries on a fresh residential IP + fingerprint. We never solve captchas.
@@ -150,10 +150,9 @@ const crawler = new PlaywrightCrawler({
         },
         // Recycle the browser every few pages so a fresh fingerprint is minted periodically.
         retireBrowserAfterPageCount: config.retireBrowserAfterPageCount,
-        // Log the effective fingerprint once per browser start. The first page created on a browser
-        // carries that browser's freshly minted identity; we apply the US region overrides first so
-        // the logged timezone/locale match exactly what AliExpress will see (the injector spoofs
-        // UA/navigator/headers but not timezone — that comes from `applyRegionOverrides`).
+        // Apply the US region overrides once per browser start (the first page created on a browser
+        // carries its freshly minted fingerprint). The injector spoofs UA/navigator/headers but not
+        // timezone — that comes from `applyRegionOverrides`.
         postPageCreateHooks: [
             async (page, browserController) => {
                 if (loggedBrowsers.has(browserController)) {
@@ -161,12 +160,6 @@ const crawler = new PlaywrightCrawler({
                 }
                 loggedBrowsers.add(browserController);
                 await applyRegionOverrides(page);
-                const identity = await readBrowserIdentity(page);
-                log.info('Browser started — fingerprint identity', identity ?? { error: 'unavailable' });
-                // Log the egress IP for THIS browser/session too, so every rotation shows both a new
-                // fingerprint AND the IP it leaves from. Comparing IPs across "Browser started" lines is
-                // the proof that retiring a blocked session actually moved us to a fresh residential IP.
-                await logEgressIp(page, log, 'browser-start');
             },
         ],
     },
@@ -174,12 +167,27 @@ const crawler = new PlaywrightCrawler({
     // --- Navigation strategy --------------------------------------------------------------
     preNavigationHooks: [
         async ({ page }, gotoOptions) => {
-            // Never wait for `networkidle` on AliExpress — it keeps connections open and the
-            // event rarely fires, causing needless navigation timeouts. We wait for real
-            // product selectors in the handler instead.
+            // We only navigate to bootstrap the anti-bot cookies the signed `pdp.pc.query` call
+            // needs, then fetch the product JSON ourselves — so block the heavy subresources
+            // (images, fonts, CSS, media) that would otherwise saturate the residential proxy and
+            // slow every request. The HTML document + scripts (which set the cookies) and XHR/fetch
+            // are left alone. We also arm the pdp.pc.query interceptor as a fallback to the direct call.
+            await page.route('**/*', async (route) => {
+                const type = route.request().resourceType();
+                if (type === 'image' || type === 'media' || type === 'font' || type === 'stylesheet') {
+                    await route.abort();
+                    return;
+                }
+                await route.continue();
+            });
+            armPdpInterceptor(page);
+            // Wait only for `commit` — navigation resolves the instant the document response is
+            // received (headers + Set-Cookie processed), WITHOUT waiting for the heavy SPA to
+            // parse/execute. We don't need the rendered DOM: the handler fetches the product JSON via
+            // the signed API itself. Never `networkidle` (AliExpress holds connections open).
             if (gotoOptions) {
                 // eslint-disable-next-line no-param-reassign -- mutating gotoOptions is the documented Crawlee way to set navigation options.
-                gotoOptions.waitUntil = 'domcontentloaded';
+                gotoOptions.waitUntil = 'commit';
             }
             // Force US timezone/locale (CDP) so they match the en-US fingerprint + US proxy,
             // then layer the extra stealth patches. Both run before navigation.

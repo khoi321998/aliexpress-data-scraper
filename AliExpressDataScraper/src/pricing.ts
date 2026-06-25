@@ -1,16 +1,8 @@
-// Product pricing extraction — the headline price from the AliExpress PDP price block.
+// Price-string parsing helpers — turn a localized, currency-prefixed price string
+// (e.g. `₫1,209,822`, `$12.99`, `€12,99`) into an ISO currency code + numeric amount.
 //
-// The price lives in `.price-default--wrap` › `.price-default--current` as a localized,
-// currency-prefixed string (e.g. `₫1,209,822`, `$12.99`, `€12,99`). Class names are
-// content-hashed per build, so we match on the stable `price-default--current` prefix and parse
-// the currency symbol + numeric amount out of the text ourselves.
-import type { Page } from 'playwright';
-
-import type { Pricing } from './types.js';
-
-// The discounted/headline price. Fall through progressively looser selectors so a markup tweak
-// that renames the suffix still yields the value.
-const CURRENT_PRICE_SELECTOR = '[class*="price-default--current--"], [class*="price-default--current"]';
+// Consumed by `productApi.ts`, which reads prices out of the `pdp.pc.query` JSON
+// (`salePriceString` / `originalPrice`) rather than the page DOM.
 
 // Map the leading currency symbol AliExpress renders to its ISO 4217 code. Falls back to the
 // raw symbol when unknown so the information is never lost.
@@ -85,39 +77,4 @@ export function parsePrice(text: string): number | null {
 
     const value = Number(normalized);
     return Number.isFinite(value) ? value : null;
-}
-
-/**
- * Extract the price range from the PDP price block.
- *
- * Reads the current-price text from a single selector and parses out the currency and numeric
- * amount(s). AliExpress renders a range (`₫1,000 - ₫2,000`) in this same element when a product
- * has SKU variants at different prices, and a single value otherwise — so `priceMin`/`priceMax`
- * both come from this one selector: the two ends of the range, or the same value when there's no
- * range.
- */
-export async function extractPricing(page: Page): Promise<Pricing> {
-    const text = await page
-        .locator(CURRENT_PRICE_SELECTOR)
-        .first()
-        .textContent({ timeout: 2_000 })
-        .catch(() => null);
-
-    const raw = text?.trim() ?? '';
-
-    // Split a range like `₫1,000 - ₫2,000` on the separating dash (en/em dash or hyphen). A lone
-    // value yields a single part used for both ends.
-    const parts = raw
-        .split(/\s[-–—]\s/)
-        .map((part) => parsePrice(part))
-        .filter((value): value is number => value !== null);
-
-    const priceMin = parts.length > 0 ? Math.min(...parts) : null;
-    const priceMax = parts.length > 0 ? Math.max(...parts) : null;
-
-    return {
-        currency: parseCurrency(raw) ?? '',
-        priceMin,
-        priceMax,
-    };
 }

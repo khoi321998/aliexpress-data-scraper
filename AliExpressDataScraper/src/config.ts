@@ -71,14 +71,6 @@ export interface ScraperConfig {
 
     /** Refresh the browser (and thus its fingerprint) after this many pages. */
     retireBrowserAfterPageCount: number;
-
-    humanize: {
-        minActionDelayMs: number;
-        maxActionDelayMs: number;
-        /** Extra settle time after `domcontentloaded` for client-side hydration. */
-        minHydrationDelayMs: number;
-        maxHydrationDelayMs: number;
-    };
 }
 
 function asPositiveInt(value: unknown, fallback: number): number {
@@ -123,11 +115,5 @@ export function buildConfig(input: ScraperInput): ScraperConfig {
             maxErrorScore: 1,
         },
         retireBrowserAfterPageCount: 5,
-        humanize: {
-            minActionDelayMs: 400,
-            maxActionDelayMs: 1_500,
-            minHydrationDelayMs: 1_500,
-            maxHydrationDelayMs: 3_000,
-        },
     };
 }

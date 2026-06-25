@@ -8,10 +8,9 @@
 //                                       date, star = buyerEval/20, sku, photos).
 //   data.impressionDTOList[]         → review "impression" keywords, e.g. "elegant appearance".
 //   data.filterInfo.filterStatistic  → counts per filter; the `image` code = reviews carrying photos.
-import type { Log } from 'apify';
-import type { Page } from 'playwright';
-
-import { fetchProductReviews } from './sellerApi.js';
+//
+// The signed MTOP fetching + per-star collection lives in `productApi.ts`
+// ({@link collectReviewsViaRequest}); this module is just the response→DTO parser it calls.
 import type { RatingBreakdown, ReviewSample, ReviewsSummary } from './types.js';
 
 /** Narrow an unknown to a plain object for safe property access; non-objects become `{}`. */
@@ -105,44 +104,4 @@ export function parseProductReviews(res: unknown): ReviewsSummary | null {
         ratingBreakdown,
         reviewSamples,
     };
-}
-
-/**
- * Build a {@link ReviewsSummary} by fetching reviews per star rating: one API call per star (1→5),
- * keeping at most `perStar` sample reviews from each. The overall rating, per-star breakdown and
- * keywords are filter-independent, so they're taken from the first call that returns a usable shape.
- *
- * The MTOP calls share a single JSONP callback name, so they MUST run sequentially. Returns `null`
- * when no star call yielded a recognizable response.
- */
-export async function collectProductReviews(
-    page: Page,
-    productId: string | number,
-    sellerAdminSeq: string | number | null,
-    log: Log,
-    opts: { perStar?: number } = {},
-): Promise<ReviewsSummary | null> {
-    const perStar = opts.perStar ?? 5;
-    let summary: ReviewsSummary | null = null;
-    const reviewSamples: ReviewSample[] = [];
-
-    // Highest stars first so the most positive reviews lead the sample list.
-    for (let star = 5; star >= 1; star -= 1) {
-        const res = await fetchProductReviews(page, productId, sellerAdminSeq, log, { filter: star, pageSize: perStar });
-        const parsed = parseProductReviews(res);
-        if (!parsed) {
-            continue;
-        }
-        // The statistic block is overall (not affected by `filter`); keep the first one we obtain.
-        if (!summary) {
-            summary = parsed;
-        }
-        reviewSamples.push(...parsed.reviewSamples.slice(0, perStar));
-    }
-
-    if (!summary) {
-        return null;
-    }
-    log.info('product reviews collected', { perStar, samples: reviewSamples.length });
-    return { ...summary, reviewSamples };
 }
