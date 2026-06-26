@@ -1,70 +1,58 @@
-// The reusable "seller pipeline": given a store id and a warm page, scrape the seller's profile
-// entirely from the DOM — no MTOP API, no token dance, no `sellerSeq`. Used by BOTH the dedicated
-// `seller_only` crawler (`sellerPipeline.ts`) and the `product_and_seller` product flow
-// (`routes.ts`), so the seller shape is identical regardless of how it was reached.
+// The reusable "seller pipeline": given a store path id and a warm page, scrape the seller's profile
+// entirely from AliExpress's own APIs — NO DOM scraping. Used by BOTH the dedicated `seller_only`
+// crawler (`sellerPipeline.ts`) and the `product_and_seller` product flow (`routes.ts`), so the
+// seller shape is identical regardless of how it was reached.
 //
-// Two store pages are read:
-//   1. all-items  (`/store/<id>/pages/all-items.html`)  → product previews
-//   2. feedback   (`/store/feedback-score/<id>.html`)   → credibility + review counts + reviews
+// Flow (one lightweight navigation, then pure API):
+//   1. navigate the store's all-items page once — this warms the anti-bot cookies (baxia/x5sec) the
+//      signed API calls need AND makes the store SPA fire `renderPageData.htm`, which carries the
+//      REAL `sellerId` (intercepted; request.get fallback). Captcha here is SOLVED via 2captcha
+//      (see `sellerCaptcha.ts`), never rotated — the seller pipeline runs on a real local IP.
+//   2. with the sellerId: `mtop.ae.shop.seller.page.info` (credibility/counts/base info),
+//      `evaluation.productEvaluation` (store reviews), `productList` (paginated catalog) — all via
+//      the page request context, reusing the warm session.
 //
-// Captcha handling is best-effort and internal (detect → solve via 2captcha → reload, up to 2
-// rounds). It never throws: `scrapeSellerData` returns `blocked: true` when a page couldn't be
-// cleared, leaving the caller to decide whether to retry on a fresh browser.
+// Never throws: returns `blocked: true` when the page stayed behind a captcha or no sellerId could be
+// resolved, leaving the caller to decide whether to retry on a fresh browser.
 import type { Log } from 'apify';
-import { chromium } from 'playwright';
 import type { Page } from 'playwright';
+import { chromium } from 'playwright';
 
 import type { ScraperConfig } from './config.js';
 import { logEgressIp } from './ip.js';
+import type { SellerInfo } from './sellerApi.js';
+import { armSellerIdInterceptor, fetchSellerInfo, resolveSellerId } from './sellerApi.js';
 import { detectBlock, trySolveCaptcha } from './sellerCaptcha.js';
-import type { SellerFeedback } from './sellerFeedback.js';
-import { collectSellerReviewsFromDom, extractSellerFeedback } from './sellerFeedback.js';
-import { extractStoreAllItemsPreviews } from './sellerProducts.js';
+import { fetchSellerProducts } from './sellerProductsApi.js';
+import { fetchSellerReviews } from './sellerReviewsApi.js';
 import type { Seller, SellerProductPreview, SellerReviewSample } from './types.js';
-import { storeAllItemsUrl, storeFeedbackUrl } from './url.js';
+import { storeAllItemsUrl } from './url.js';
 
-/**
- * Read the store name from a store-page header. The header is inline-styled (no stable class
- * names), so we key off the store link's `data-href` and skip the sibling links (reviews / follow /
- * contact) that share the `/store/` href fragment.
- */
-export async function readStoreName(page: Page): Promise<string | null> {
-    return page
-        .evaluate(() => {
-            const anchors = Array.from(document.querySelectorAll('a[data-href*="/store/"]'));
-            for (const a of anchors) {
-                const text = (a.querySelector('span')?.textContent ?? a.textContent ?? '').replace(/\s+/g, ' ').trim();
-                if (text && !/positive|review|follow|contact/i.test(text)) {
-                    return text;
-                }
-            }
-            return null;
-        })
-        .catch(() => null);
-}
-
-/** Map the DOM-scraped pieces into the shared {@link Seller} DTO (extra fields ride the index signature). */
+/** Map the API-fetched pieces into the shared {@link Seller} DTO (extra fields ride the index signature). */
 export function buildSellerDto(
-    storeId: string,
-    storeName: string | null,
-    feedback: SellerFeedback,
+    pathId: string,
+    sellerId: string | null,
+    info: SellerInfo | null,
     sellerReviews: SellerReviewSample[],
     productPreviews: SellerProductPreview[],
 ): Seller {
     return {
-        platformSellerId: storeId,
-        name: storeName ?? feedback.storeName,
-        url: `https://www.aliexpress.com/store/${storeId}`,
-        positiveFeedbackPercent: feedback.positiveFeedbackPercent,
-        feedbackScore: feedback.totalCount,
-        openedSinceText: feedback.openedSinceText,
+        platformSellerId: sellerId ?? pathId,
+        name: info?.storeName ?? null,
+        url: `https://www.aliexpress.com/store/${pathId}`,
+        countryName: info?.countryName ?? null,
+        followersText: info?.followersText ?? null,
+        storeLogo: info?.storeLogo ?? null,
+        positiveFeedbackPercent: info?.positiveFeedbackPercent ?? null,
+        feedbackScore: info?.totalCount ?? null,
+        openedSinceText: info?.openedSinceText ?? null,
         reviewCounts: {
-            positive: feedback.positiveCount,
-            neutral: feedback.neutralCount,
-            negative: feedback.negativeCount,
-            total: feedback.totalCount,
+            positive: info?.positiveCount ?? null,
+            neutral: info?.neutralCount ?? null,
+            negative: info?.negativeCount ?? null,
+            total: info?.totalCount ?? null,
         },
-        scores: feedback.scores,
+        scores: info?.scores ?? [],
         productPreviews,
         sellerReviews,
     };
@@ -77,7 +65,7 @@ export function buildSellerDto(
  */
 async function passCaptcha(page: Page, config: ScraperConfig, log: Log, label: string): Promise<boolean> {
     for (let attempt = 1; attempt <= 2; attempt++) {
-        await page.waitForLoadState('domcontentloaded').catch(() => {});
+        await page.waitForLoadState('domcontentloaded').catch(() => undefined);
 
         // Detect the captcha ASAP — the punish script injects its dialog very early, so polling logs
         // it within ~1s instead of waiting on networkidle.
@@ -97,94 +85,118 @@ async function passCaptcha(page: Page, config: ScraperConfig, log: Log, label: s
             return true; // couldn't solve — report still-blocked
         }
 
-        // Reload so the SPA renders the real content with the validated cookies.
+        // Reload so the SPA renders the real content (and re-fires renderPageData) with the validated cookies.
         log.info(`🔄 Reloading ${label} to load content after passing the captcha...`);
-        await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+        await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => undefined);
     }
     // After both rounds, report whether a captcha is still present.
     return Boolean(await detectBlock(page));
 }
 
 /**
- * Poll up to 30s for the SPA to render real content (avoid extracting off the loading spinner).
- * Returns `true` once the predicate matches, `false` if the 30s budget runs out — so it never hangs:
- * the worst case is a bounded 30s wait, after which the caller extracts whatever is in the DOM.
- */
-async function waitForReady(page: Page, predicate: () => boolean): Promise<boolean> {
-    for (let i = 0; i < 30; i++) {
-        if (await page.evaluate(predicate).catch(() => false)) return true;
-        await page.waitForTimeout(1_000);
-    }
-    return false;
-}
-
-/**
- * Scrape a seller's full DOM profile for `storeId` using the given warm page: product previews from
- * the all-items page, then credibility + review counts + per-star reviews from the feedback page.
+ * Scrape a seller's full profile for the store `pathId` (the `/store/<id>` number) using the given
+ * warm page, entirely via AliExpress APIs. Resolves the real sellerId from renderPageData, then pulls
+ * profile + reviews + product catalog.
  *
- * Returns the built {@link Seller} plus a `blocked` flag (true when either store page stayed behind
- * a captcha that couldn't be solved). Never throws — anti-bot recovery is the caller's call.
+ * Returns the built {@link Seller} plus a `blocked` flag (true when the page stayed behind a captcha
+ * or no sellerId could be resolved). Never throws — anti-bot recovery is the caller's call.
  */
 export async function scrapeSellerData(
     page: Page,
-    storeId: string,
+    pathId: string,
     log: Log,
     config: ScraperConfig,
-    opts: { alreadyOnAllItems?: boolean } = {},
+    opts: { alreadyOnAllItems?: boolean; knownSellerId?: string | null } = {},
 ): Promise<{ seller: Seller; blocked: boolean }> {
-    // tsx/esbuild rewrites the DOM extractors' named inner functions to call a `__name` helper that
-    // doesn't exist in the page context → "ReferenceError: __name is not defined". The dedicated
-    // seller crawler shims it in a preNavigationHook, but the product crawler does not, so shim it
-    // here: once on the current document (covers the already-loaded page) and via addInitScript (covers
-    // every navigation this function triggers). The shim itself is a plain arrow, so it's safe to run
-    // even before `__name` exists.
+    // tsx/esbuild rewrites named functions to call a `__name` helper that doesn't exist in the page
+    // context → "ReferenceError: __name is not defined" inside page.evaluate (used by logEgressIp /
+    // detectBlock). The seller_only crawler shims it in a preNavigationHook, but scrapeSellerLocal
+    // launches a raw browser with no such hook, so shim it here: once on the current document and via
+    // addInitScript for every navigation this function triggers.
     const nameShim = () => {
         const w = window as unknown as { __name?: (fn: unknown) => unknown };
+        // eslint-disable-next-line no-underscore-dangle -- shimming esbuild's __name helper
         w.__name = w.__name || ((fn: unknown) => fn);
     };
-    await page.evaluate(nameShim).catch(() => {});
-    await page.addInitScript(nameShim).catch(() => {});
+    await page.addInitScript(nameShim).catch(() => undefined);
+    await page.evaluate(nameShim).catch(() => undefined);
 
-    // Confirm the seller scrape is leaving via the REAL local/container IP (no proxy) — contrast this
-    // line with the "egress IP (product)" line, which should show the residential proxy IP.
+    // Confirm the seller scrape is leaving via the REAL local/container IP (no proxy).
     await logEgressIp(page, log, 'seller');
 
-    // --- Page 1: all-items grid → product previews ----------------------------------------------
-    // In `seller_only` Crawlee has ALREADY navigated to the all-items page, so the caller passes
-    // `alreadyOnAllItems: true` and we must NOT navigate again — a redundant second goto reloads the
-    // page right as the punish dialog appears, resetting the captcha mid-solve (the refresh-on-open).
-    // The product flow lands on a PDP, so it omits the flag and we navigate here.
+    // Arm the renderPageData interceptor (idempotent). For `seller_only` the dedicated crawler arms it
+    // in a preNavigationHook (before Crawlee's goto); here we arm before our own goto below.
+    armSellerIdInterceptor(page);
+
+    // ONE navigation: the all-items page warms the anti-bot cookies the APIs need and fires
+    // renderPageData (→ sellerId). In `seller_only` Crawlee already navigated, so we must NOT navigate
+    // again (a second goto would reload mid-captcha). The product flow lands on a PDP, so it navigates.
     if (!opts.alreadyOnAllItems) {
-        log.info(`➡️  Seller: opening all-items page for store ${storeId}`);
-        await page.goto(storeAllItemsUrl(storeId), { waitUntil: 'domcontentloaded' }).catch(() => {});
+        log.info(`➡️  Seller: opening all-items page for store ${pathId}`);
+        await page.goto(storeAllItemsUrl(pathId), { waitUntil: 'domcontentloaded' }).catch(() => undefined);
     }
-    let blocked = await passCaptcha(page, config, log, 'all-items');
-    // Wait specifically for a PRODUCT CARD to render — NOT just the store header. The header
-    // (followers text / store link) renders well before the product grid, so OR-ing it in here let us
-    // break early and extract an empty grid (→ 0 previews). Anchoring solely on the product card means
-    // we keep polling until the grid actually hydrates. Bounded to 30s by waitForReady, so a store that
-    // genuinely renders no cards just waits out the budget and extracts 0 — it never hangs.
-    const gridReady = await waitForReady(page, () => document.querySelector('a[ae_object_type="product"][href*="/item/"]') != null);
-    if (!gridReady) {
-        log.warning('all-items product grid did not render within 30s — previews may come back empty (page slow/blocked or store truly has no items)');
+    const blocked = await passCaptcha(page, config, log, 'all-items');
+
+    // Resolve the REAL sellerId: from the PDP (product flow) if known, else from renderPageData.
+    const resolved = opts.knownSellerId ? { sellerId: opts.knownSellerId, shopId: pathId, storeName: null } : await resolveSellerId(page, pathId, log);
+    if (!resolved) {
+        log.warning('Seller: could not resolve sellerId (likely still blocked) — returning empty seller.');
+        return { seller: buildSellerDto(pathId, null, null, [], []), blocked: true };
     }
-    const storeName = await readStoreName(page);
-    const productPreviews = await extractStoreAllItemsPreviews(page, log, 10);
+    const { sellerId } = resolved;
 
-    // --- Page 2: feedback page → credibility + review counts + reviews --------------------------
-    log.info(`➡️  Seller: opening feedback page for store ${storeId}`);
-    await page.goto(storeFeedbackUrl(storeId), { waitUntil: 'domcontentloaded' }).catch(() => {});
-    blocked = (await passCaptcha(page, config, log, 'feedback')) || blocked;
-    await waitForReady(page, () => /store credibility|customer reviews/i.test(document.body?.innerText ?? ''));
-    const feedback = await extractSellerFeedback(page, log);
-    const sellerReviews = await collectSellerReviewsFromDom(page, log, 5);
+    const apiOpts = { language: config.language, currency: config.currency, country: config.proxyCountry };
+    // Profile + reviews (acs.com MTOP) and products (shoprenderview) run concurrently — independent calls.
+    const [info, sellerReviews, productPreviews] = await Promise.all([
+        fetchSellerInfo(page, sellerId, log, apiOpts),
+        fetchSellerReviews(page, sellerId, log, apiOpts, 25),
+        fetchSellerProducts(page, sellerId, pathId, log, apiOpts, 10, 10),
+    ]);
 
-    const seller = buildSellerDto(storeId, storeName, feedback, sellerReviews, productPreviews);
-    log.info('🏪 seller scraped', {
-        storeId,
+    const seller = buildSellerDto(pathId, sellerId, info, sellerReviews, productPreviews);
+    log.info('🏪 seller scraped (API)', {
+        pathId,
+        sellerId,
         name: seller.name,
         previews: productPreviews.length,
         reviews: sellerReviews.length,
+        positiveFeedbackPercent: info?.positiveFeedbackPercent ?? null,
+        blocked,
+    });
+    return { seller, blocked };
+}
+
+/**
+ * Fetch the seller profile INLINE on an already-warm page (the product page) using a known sellerId
+ * (the PDP's `adminSeq`) — NO navigation, NO captcha, NO separate browser. All three endpoints are
+ * pure request.get on the warm session (profile + reviews on `acs.aliexpress.com`; products via
+ * ModuleAsyncService, which — unlike shoprenderview — needs no store navigation). Used by
+ * `product_and_seller` as the fast path; the caller falls back to {@link scrapeSellerLocal} when this
+ * returns `blocked` (e.g. the product's proxy IP is punished on the seller gateway).
+ */
+export async function scrapeSellerInline(
+    page: Page,
+    pathId: string,
+    sellerId: string,
+    log: Log,
+    config: ScraperConfig,
+): Promise<{ seller: Seller; blocked: boolean }> {
+    const apiOpts = { language: config.language, currency: config.currency, country: config.proxyCountry };
+    const [info, sellerReviews, productPreviews] = await Promise.all([
+        fetchSellerInfo(page, sellerId, log, apiOpts),
+        fetchSellerReviews(page, sellerId, log, apiOpts, 25),
+        fetchSellerProducts(page, sellerId, pathId, log, apiOpts, 10, 10),
+    ]);
+    // If everything came back empty, treat as blocked so the caller can fall back to a local browser.
+    const blocked = !info && sellerReviews.length === 0 && productPreviews.length === 0;
+    const seller = buildSellerDto(pathId, sellerId, info, sellerReviews, productPreviews);
+    log.info('🏪 seller scraped (inline API)', {
+        pathId,
+        sellerId,
+        name: seller.name,
+        previews: productPreviews.length,
+        reviews: sellerReviews.length,
+        positiveFeedbackPercent: info?.positiveFeedbackPercent ?? null,
         blocked,
     });
     return { seller, blocked };
@@ -196,15 +208,17 @@ export async function scrapeSellerData(
  * residential proxy + a spoofed fingerprint: the seller scrape must NOT inherit those (seller data is
  * read from the real local IP), so we launch a separate Chrome here instead of reusing the product page.
  *
- * The browser is closed when done. Best-effort: on launch failure it returns an empty (blocked) seller
- * so the product result is unaffected.
+ * `knownSellerId` (the PDP's `adminSeq`) lets us skip renderPageData resolution when the product flow
+ * already has it. The browser is closed when done. Best-effort: on launch failure it returns an empty
+ * (blocked) seller so the product result is unaffected.
  */
 export async function scrapeSellerLocal(
-    storeId: string,
+    pathId: string,
     log: Log,
     config: ScraperConfig,
+    knownSellerId: string | null = null,
 ): Promise<{ seller: Seller; blocked: boolean }> {
-    log.info(`🧭 Seller: launching a local (no-proxy, no-fingerprint) browser for store ${storeId}`);
+    log.info(`🧭 Seller: launching a local (no-proxy, no-fingerprint) browser for store ${pathId}`);
     const browser = await chromium.launch({
         channel: 'chrome', // real Chrome, matching the seller_only pipeline (useChrome)
         headless: config.headless,
@@ -214,8 +228,7 @@ export async function scrapeSellerLocal(
     });
     try {
         const context = await browser.newContext();
-        // Match the seller_only crawler's `navigationTimeoutSecs: 90` (Playwright defaults to 30s, too
-        // short for a slow store page behind a punish).
+        // Match the seller_only crawler's `navigationTimeoutSecs: 90` (Playwright defaults to 30s, too short).
         context.setDefaultNavigationTimeout(90_000);
         // Force English + USD via AliExpress's locale cookie (IP-independent), same as the seller crawler.
         const localeCookieValue = `site=glo&c_tp=${config.currency}&region=${config.proxyCountry}&b_locale=${config.language}&ae_u_p_s=2`;
@@ -224,8 +237,8 @@ export async function scrapeSellerLocal(
             { name: 'intl_locale', value: config.language, domain: '.aliexpress.com', path: '/' },
         ]);
         const page = await context.newPage();
-        return await scrapeSellerData(page, storeId, log, config, { alreadyOnAllItems: false });
+        return await scrapeSellerData(page, pathId, log, config, { alreadyOnAllItems: false, knownSellerId });
     } finally {
-        await browser.close().catch(() => {});
+        await browser.close().catch(() => undefined);
     }
 }

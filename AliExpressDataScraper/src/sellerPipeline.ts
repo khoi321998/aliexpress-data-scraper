@@ -6,18 +6,19 @@
 //   - When AliExpress serves a punish / reCAPTCHA page it SOLVES it via 2captcha (see
 //     `sellerCaptcha.ts`) and reloads, rather than rotating to a fresh session.
 //
-// The actual scraping (all-items previews + feedback credibility/reviews) lives in the shared
+// The actual scraping (sellerId resolution + profile/reviews/products via API) lives in the shared
 // `scrapeSellerData` (`sellerProfile.ts`), reused by the `product_and_seller` flow. This file just
 // drives the dedicated crawler and emits the main `ProductSellerResponse` DTO with `product: null`.
-import { PlaywrightCrawler, createPlaywrightRouter } from '@crawlee/playwright';
+import { createPlaywrightRouter,PlaywrightCrawler } from '@crawlee/playwright';
 import { Actor, log } from 'apify';
 
 import type { ScraperConfig, ScraperInput } from './config.js';
 import { createSellerOnlyResponse } from './response.js';
+import { armSellerIdInterceptor } from './sellerApi.js';
 import { scrapeSellerData } from './sellerProfile.js';
 import { normalizeAliExpressStoreUrl } from './url.js';
 
-/** Build the router for the seller pipeline: scrape the seller DOM and push the main DTO. */
+/** Build the router for the seller pipeline: scrape the seller via API and push the main DTO. */
 function createSellerRouter(config: ScraperConfig) {
     const router = createPlaywrightRouter();
 
@@ -26,7 +27,7 @@ function createSellerRouter(config: ScraperConfig) {
         reqLog.info(`🌐 seller_only: scraping store ${storeId}`);
 
         // Crawlee already navigated to the all-items page for this request — don't re-navigate (that
-        // would refresh the page mid-captcha). The feedback page is navigated inside scrapeSellerData.
+        // would refresh the page mid-captcha). All seller data is then fetched via API inside scrapeSellerData.
         const { seller, blocked } = await scrapeSellerData(page, storeId, reqLog, config, { alreadyOnAllItems: true });
 
         // If a captcha stayed up and we got nothing, retire the browser (the punish state is bound to
@@ -125,11 +126,17 @@ export async function runSellerOnly(input: ScraperInput, config: ScraperConfig):
                     { name: 'intl_locale', value: config.language, domain: '.aliexpress.com', path: '/' },
                 ]);
 
-                // tsx/esbuild wraps named functions with a `__name` helper that does NOT exist
-                // inside page.evaluate's browser context, causing "ReferenceError: __name is not
-                // defined". Shim it on every document so the DOM extractors' closures run cleanly.
+                // Capture the real sellerId from the store SPA's renderPageData call. MUST be armed
+                // before Crawlee navigates (the call fires on load), so this hook is the only place it
+                // can be done for the dedicated crawler.
+                armSellerIdInterceptor(page);
+
+                // tsx/esbuild wraps named functions with a `__name` helper that does NOT exist inside
+                // page.evaluate's browser context ("ReferenceError: __name is not defined"). The captcha
+                // detector (`detectBlock`) runs page.evaluate, so shim it on every document.
                 await page.addInitScript(() => {
                     const w = window as unknown as { __name?: (fn: unknown) => unknown };
+                    // eslint-disable-next-line no-underscore-dangle -- shimming esbuild's __name helper
                     w.__name = w.__name || ((fn: unknown) => fn);
                 });
             },

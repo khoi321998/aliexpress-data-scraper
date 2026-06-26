@@ -167,6 +167,19 @@ const crawler = new PlaywrightCrawler({
     // --- Navigation strategy --------------------------------------------------------------
     preNavigationHooks: [
         async ({ page }, gotoOptions) => {
+            // AliExpress decides the price currency from the `aep_usuc_f` locale cookie (and the proxy
+            // IP geo), NOT from the `_currency` field in the pdp.pc.query payload — that field is
+            // ignored, so a Swedish residential IP yields SEK prices despite `_currency: 'USD'`. Force
+            // the cookie before navigation (same lever the seller pipeline uses) to pin USD regardless
+            // of which residential IP we land on. Set on both AliExpress domains we touch (.com for
+            // navigation, .us for the acs API host).
+            const localeCookieValue = `site=glo&c_tp=${config.currency}&region=${config.proxyCountry}&b_locale=${config.language}&ae_u_p_s=2`;
+            await page.context().addCookies([
+                { name: 'aep_usuc_f', value: localeCookieValue, domain: '.aliexpress.com', path: '/' },
+                { name: 'intl_locale', value: config.language, domain: '.aliexpress.com', path: '/' },
+                { name: 'aep_usuc_f', value: localeCookieValue, domain: '.aliexpress.us', path: '/' },
+                { name: 'intl_locale', value: config.language, domain: '.aliexpress.us', path: '/' },
+            ]);
             // We only navigate to bootstrap the anti-bot cookies the signed `pdp.pc.query` call
             // needs, then fetch the product JSON ourselves — so block the heavy subresources
             // (images, fonts, CSS, media) that would otherwise saturate the residential proxy and

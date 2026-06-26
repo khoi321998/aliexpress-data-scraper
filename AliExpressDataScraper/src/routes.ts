@@ -6,7 +6,7 @@ import type { ScraperConfig } from './config.js';
 import { classifyPage } from './detection.js';
 import { collectReviewsViaRequest, fetchDescription, fetchPdpDirect, parsePdpResult, waitForPdpResult } from './productApi.js';
 import { createAliExpressResponse } from './response.js';
-import { scrapeSellerLocal } from './sellerProfile.js';
+import { scrapeSellerInline, scrapeSellerLocal } from './sellerProfile.js';
 import type { Seller } from './types.js';
 import { normalizeAliExpressStoreUrl } from './url.js';
 
@@ -45,15 +45,18 @@ function storeIdFromRef(url: string | null, platformSellerId: string | null): st
 }
 
 /**
- * Kick off the (slow, captcha-bound) seller scrape for a product's seller, running it CONCURRENTLY
- * with the rest of product extraction. The scrape uses its own local browser, so it doesn't contend
- * with the product page. Returns the in-flight promise (awaited just before pushData), or `null`
- * when there's no seller, the run is `product_only`, or no store id could be resolved.
+ * Kick off the seller scrape for a product's seller, running it CONCURRENTLY with the rest of product
+ * extraction. Returns the in-flight promise (awaited just before pushData), or `null` when there's no
+ * seller, the run is `product_only`, or no store id could be resolved.
  *
- * Caches the PROMISE (not the result) keyed by store id, so concurrent products of the same store
- * share a single scrape instead of each launching their own browser + captcha solve.
+ * Fast path: when the PDP gave us the real sellerId (`adminSeq`), fetch the seller INLINE on the
+ * product page via APIs — no separate browser, no navigation, no captcha. If that comes back blocked
+ * (e.g. the product's proxy IP is punished on the seller gateway), fall back to a dedicated local
+ * (no-proxy) browser that solves the captcha. Caches the PROMISE (not the result) keyed by store id,
+ * so concurrent products of the same store share a single scrape.
  */
 function kickoffSellerScrape(
+    page: PlaywrightCrawlingContext['page'],
     response: ReturnType<typeof createAliExpressResponse>,
     config: ScraperConfig,
     log: Log,
@@ -74,15 +77,32 @@ function kickoffSellerScrape(
     if (cached) {
         return cached;
     }
+    // The PDP's `adminSeq` (sellerRef.platformSellerId) IS the real sellerId the seller APIs need.
+    const knownSellerId = response.sellerRef.platformSellerId;
     log.info(`🚀 Triggering seller scrape for store ${storeId} now (runs while we finish the product)…`);
-    const sellerPromise = scrapeSellerLocal(storeId, log, config)
-        .then((r) => r.seller)
-        .catch((error) => {
-            log.warning('Seller DOM scrape failed — skipping seller (product unaffected).', {
+    const sellerPromise = (async (): Promise<Seller | null> => {
+        // Fast path: inline on the product page when we already have the sellerId.
+        if (knownSellerId) {
+            const inline = await scrapeSellerInline(page, storeId, knownSellerId, log, config).catch((error) => {
+                log.warning('Inline seller fetch threw — will fall back to a local browser.', {
+                    error: error instanceof Error ? error.message : String(error),
+                });
+                return null;
+            });
+            if (inline && !inline.blocked) {
+                return inline.seller;
+            }
+            log.info('Inline seller fetch blocked/empty — falling back to a local (no-proxy) browser.');
+        }
+        // Fallback: dedicated local browser (resolves sellerId via renderPageData + solves captcha).
+        const local = await scrapeSellerLocal(storeId, log, config, knownSellerId).catch((error) => {
+            log.warning('Seller scrape failed — skipping seller (product unaffected).', {
                 error: error instanceof Error ? error.message : String(error),
             });
             return null;
         });
+        return local ? local.seller : null;
+    })();
     sellerCache.set(storeId, sellerPromise);
     return sellerPromise;
 }
@@ -153,7 +173,7 @@ export function createRouter(config: ScraperConfig) {
         });
 
         // Seller scrape runs concurrently (uses sellerRef from the JSON). product_only skips it.
-        const sellerPromise = kickoffSellerScrape(response, config, log, sellerCache);
+        const sellerPromise = kickoffSellerScrape(page, response, config, log, sellerCache);
 
         // Description — fetched from the URL embedded in the JSON, then cleaned.
         response.product.description = await fetchDescription(page, parsed.descUrl, log);
