@@ -24,36 +24,6 @@
                 }
             ]
         },
-        "maxRequestsPerCrawl": {
-            "title": "Max Requests per Crawl",
-            "type": "integer",
-            "description": "Maximum number of pages to scrape (0 = unlimited).",
-            "default": 10,
-            "minimum": 0
-        },
-        "maxConcurrency": {
-            "title": "Max Concurrency",
-            "type": "integer",
-            "description": "How many product pages to scrape in parallel. Keep this low (1-3) for browser + residential-proxy crawls so you stay under AliExpress's rate radar.",
-            "default": 2,
-            "minimum": 1,
-            "maximum": 10
-        },
-        "maxRequestRetries": {
-            "title": "Max Request Retries",
-            "type": "integer",
-            "description": "How many times a blocked request is retried. Each retry rotates to a fresh session (new residential IP + fingerprint), so give rotation room to find a clean IP.",
-            "default": 10,
-            "minimum": 0,
-            "maximum": 15
-        },
-        "proxyCountry": {
-            "title": "Proxy Country",
-            "type": "string",
-            "description": "Two-letter country code for the Apify residential proxy (matches the en-US fingerprint by default).",
-            "default": "US",
-            "editor": "textfield"
-        },
         "headless": {
             "title": "Headless Browser",
             "type": "boolean",
@@ -67,20 +37,22 @@
             "editor": "textfield",
             "isSecret": true
         },
-        "currency": {
-            "title": "Currency",
-            "type": "string",
-            "description": "Currency code forced via the AliExpress locale cookie (e.g. \"USD\"). Used by \"Seller only\" mode to keep the store page in a consistent locale.",
-            "default": "USD",
-            "editor": "textfield"
+        "standbyPoolSize": {
+            "title": "Standby: Warm Pool Size",
+            "type": "integer",
+            "description": "Standby mode only. Number of warm browser contexts (each a sticky residential IP + fingerprint) kept alive between HTTP calls. Also caps how many calls run in parallel. Keep small — each context is a full Chrome.",
+            "default": 3,
+            "minimum": 2,
+            "maximum": 4
         },
-        "language": {
-            "title": "Language (locale)",
-            "type": "string",
-            "description": "AliExpress UI locale forced via the locale cookie (e.g. \"en_US\"). Used by \"Seller only\" mode so the store header text matches the extraction selectors.",
-            "default": "en_US",
-            "editor": "textfield"
+        "standbyMaxUsageCount": {
+            "title": "Standby: Max Uses per Context",
+            "type": "integer",
+            "description": "Standby mode only. Recycle a warm context (retire its IP + mint a fresh one) after it has served this many requests, so no single residential IP is over-used.",
+            "default": 5,
+            "minimum": 1,
+            "maximum": 50
         }
     },
-    "required": ["startUrls"]
+    "required": []
 }

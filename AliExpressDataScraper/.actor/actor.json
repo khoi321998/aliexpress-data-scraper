@@ -10,6 +10,8 @@
 		"templateId": "ts-crawlee-cheerio",
 		"generatedBy": "Claude Code with Claude Opus 4.8"
 	},
+	"usesStandbyMode": true,
+	"webServerMountPath": "/",
 	"input": "./input_schema.json",
 	"output": "./output_schema.json",
 	"storages": {

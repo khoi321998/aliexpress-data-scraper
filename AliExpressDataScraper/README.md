@@ -34,8 +34,7 @@ in particular is solver-resistant — the Actor focuses on **avoidance and rotat
   retries the request on a fresh session — a new residential IP and a new fingerprint.
 
 There is no third-party captcha service and no API key to configure. Tune the
-behavior via the Actor input (`maxConcurrency`, `maxRequestRetries`, `proxyCountry`,
-`headless`).
+behavior via the Actor input (`maxConcurrency`, `maxRequestRetries`, `headless`).
 
 ## Project Structure
 

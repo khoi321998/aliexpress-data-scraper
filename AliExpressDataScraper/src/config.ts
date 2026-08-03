@@ -26,38 +26,38 @@ export const SCRAPER_MODES: readonly ScraperMode[] = ['product_and_seller', 'pro
 export interface ScraperInput {
     startUrls?: { url: string }[];
     mode?: string;
-    maxRequestsPerCrawl?: number;
-    maxConcurrency?: number;
-    maxRequestRetries?: number;
-    proxyCountry?: string;
     headless?: boolean;
     /** 2captcha API key used by the `seller_only` pipeline to solve reCAPTCHA punish pages. */
     twoCaptchaApiKey?: string;
-    /** Currency code forced via the AliExpress locale cookie, e.g. "USD". */
-    currency?: string;
-    /** UI/content language as an AliExpress locale, e.g. "en_US". */
-    language?: string;
+    /** Standby: number of warm browser contexts to keep alive (== max simultaneous calls). */
+    standbyPoolSize?: number;
+    /** Standby: recycle a warm context after this many served requests. */
+    standbyMaxUsageCount?: number;
 }
 
 /** Fully-resolved configuration consumed by the crawler. */
 export interface ScraperConfig {
     /** Which of the three capture modes this run performs. */
     mode: ScraperMode;
+    /** Fixed to 10. */
     maxRequestsPerCrawl: number;
+    /** Fixed to 2. */
     maxConcurrency: number;
+    /** Fixed to 10. */
     maxRequestRetries: number;
     /** Hard cap for a single navigation. Kept well below the handler timeout. */
     navigationTimeoutSecs: number;
     /** Whole-request budget (navigation + hydration wait + humanization + extraction). */
     requestHandlerTimeoutSecs: number;
     headless: boolean;
+    /** Fixed to "US" — the Apify residential proxy country. */
     proxyCountry: string;
 
     /** 2captcha API key (input or `TWOCAPTCHA_API_KEY` env). `undefined` = no solver configured. */
     twoCaptchaApiKey?: string;
-    /** Currency forced via the AliExpress `aep_usuc_f` locale cookie (seller pipeline). */
+    /** Fixed to "USD" — forced via the AliExpress `aep_usuc_f` locale cookie (seller pipeline). */
     currency: string;
-    /** AliExpress locale forced via the `aep_usuc_f` cookie, e.g. "en_US". */
+    /** Fixed to "en_US" — forced via the `aep_usuc_f` cookie. */
     language: string;
 
     sessionPool: {
@@ -71,6 +71,14 @@ export interface ScraperConfig {
 
     /** Refresh the browser (and thus its fingerprint) after this many pages. */
     retireBrowserAfterPageCount: number;
+
+    /** Standby warm-pool settings (used only by the standby HTTP entry path). */
+    standby: {
+        /** Target number of warm contexts == max simultaneous in-flight calls. */
+        poolSize: number;
+        /** Recycle a warm context after this many served requests. */
+        maxUsageCount: number;
+    };
 }
 
 function asPositiveInt(value: unknown, fallback: number): number {
@@ -86,7 +94,7 @@ function asPositiveInt(value: unknown, fallback: number): number {
  * IP), and `rotate` as the challenge strategy.
  */
 export function buildConfig(input: ScraperInput): ScraperConfig {
-    const maxConcurrency = asPositiveInt(input.maxConcurrency, 2) || 1;
+    const maxConcurrency = 2;
 
     // Lenient like the rest of this file: an unrecognized/absent mode falls back to the full
     // default rather than throwing, so a typo degrades gracefully to the safest behavior.
@@ -96,18 +104,18 @@ export function buildConfig(input: ScraperInput): ScraperConfig {
 
     return {
         mode,
-        maxRequestsPerCrawl: asPositiveInt(input.maxRequestsPerCrawl, 10),
+        maxRequestsPerCrawl: 10,
         maxConcurrency,
-        maxRequestRetries: asPositiveInt(input.maxRequestRetries, 10),
+        maxRequestRetries: 10,
         navigationTimeoutSecs: 45,
         // 6 minutes: covers product extraction PLUS the `product_and_seller` seller scrape, which runs
         // in a separate local browser and may include a 2captcha solve (up to ~5 min) on the store pages.
         requestHandlerTimeoutSecs: 360,
         headless: input.headless ?? true,
-        proxyCountry: (input.proxyCountry ?? 'US').toUpperCase(),
+        proxyCountry: 'US',
         twoCaptchaApiKey: input.twoCaptchaApiKey || process.env.TWOCAPTCHA_API_KEY || undefined,
-        currency: input.currency || 'USD',
-        language: input.language || 'en_US',
+        currency: 'USD',
+        language: 'en_US',
         sessionPool: {
             // A touch larger than concurrency so a retired session can be replaced without stalling.
             maxPoolSize: Math.max(maxConcurrency + 2, 4),
@@ -115,5 +123,10 @@ export function buildConfig(input: ScraperInput): ScraperConfig {
             maxErrorScore: 1,
         },
         retireBrowserAfterPageCount: 5,
+        standby: {
+            // Clamp pool size to 2–4 (a few concurrent calls); each warm context is a full Chrome.
+            poolSize: Math.min(4, Math.max(2, asPositiveInt(input.standbyPoolSize, 3))),
+            maxUsageCount: asPositiveInt(input.standbyMaxUsageCount, 5) || 5,
+        },
     };
 }

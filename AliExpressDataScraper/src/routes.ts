@@ -1,14 +1,10 @@
 import type { PlaywrightCrawlingContext } from '@crawlee/playwright';
 import { createPlaywrightRouter } from '@crawlee/playwright';
-import type { Log } from 'apify';
 
 import type { ScraperConfig } from './config.js';
 import { classifyPage } from './detection.js';
-import { collectReviewsViaRequest, fetchDescription, fetchPdpDirect, parsePdpResult, waitForPdpResult } from './productApi.js';
-import { createAliExpressResponse } from './response.js';
-import { scrapeSellerInline, scrapeSellerLocal } from './sellerProfile.js';
+import { extractProduct } from './extractProduct.js';
 import type { Seller } from './types.js';
-import { normalizeAliExpressStoreUrl } from './url.js';
 
 /**
  * Per-run tally of how many times we rotated the session because of an anti-bot block, keyed by
@@ -38,79 +34,14 @@ function rotateAndRetry(
     throw new Error(`Anti-bot block (${reason}); rotating to a fresh session/proxy.`);
 }
 
-/** Resolve a store id from a {@link SellerRef}: prefer the `/store/<id>` in the URL, else the seller seq. */
-function storeIdFromRef(url: string | null, platformSellerId: string | null): string | null {
-    const fromUrl = url ? normalizeAliExpressStoreUrl(url)?.id : null;
-    return fromUrl ?? platformSellerId ?? null;
-}
-
 /**
- * Kick off the seller scrape for a product's seller, running it CONCURRENTLY with the rest of product
- * extraction. Returns the in-flight promise (awaited just before pushData), or `null` when there's no
- * seller, the run is `product_only`, or no store id could be resolved.
+ * Build the Playwright router for the BATCH crawler. The product handler navigates to bootstrap the
+ * anti-bot cookies, then defers to the shared {@link extractProduct} (which extracts everything from
+ * the signed `pdp.pc.query` MTOP JSON + reviews + description + seller — no page DOM is scraped).
  *
- * Fast path: when the PDP gave us the real sellerId (`adminSeq`), fetch the seller INLINE on the
- * product page via APIs — no separate browser, no navigation, no captcha. If that comes back blocked
- * (e.g. the product's proxy IP is punished on the seller gateway), fall back to a dedicated local
- * (no-proxy) browser that solves the captcha. Caches the PROMISE (not the result) keyed by store id,
- * so concurrent products of the same store share a single scrape.
- */
-function kickoffSellerScrape(
-    page: PlaywrightCrawlingContext['page'],
-    response: ReturnType<typeof createAliExpressResponse>,
-    config: ScraperConfig,
-    log: Log,
-    sellerCache: Map<string, Promise<Seller | null>>,
-): Promise<Seller | null> | null {
-    if (!response.sellerRef || config.mode !== 'product_and_seller') {
-        return null;
-    }
-    log.info('seller extracted', {
-        name: response.sellerRef.name,
-        platformSellerId: response.sellerRef.platformSellerId,
-    });
-    const storeId = storeIdFromRef(response.sellerRef.url, response.sellerRef.platformSellerId);
-    if (!storeId) {
-        return null;
-    }
-    const cached = sellerCache.get(storeId);
-    if (cached) {
-        return cached;
-    }
-    // The PDP's `adminSeq` (sellerRef.platformSellerId) IS the real sellerId the seller APIs need.
-    const knownSellerId = response.sellerRef.platformSellerId;
-    log.info(`🚀 Triggering seller scrape for store ${storeId} now (runs while we finish the product)…`);
-    const sellerPromise = (async (): Promise<Seller | null> => {
-        // Fast path: inline on the product page when we already have the sellerId.
-        if (knownSellerId) {
-            const inline = await scrapeSellerInline(page, storeId, knownSellerId, log, config).catch((error) => {
-                log.warning('Inline seller fetch threw — will fall back to a local browser.', {
-                    error: error instanceof Error ? error.message : String(error),
-                });
-                return null;
-            });
-            if (inline && !inline.blocked) {
-                return inline.seller;
-            }
-            log.info('Inline seller fetch blocked/empty — falling back to a local (no-proxy) browser.');
-        }
-        // Fallback: dedicated local browser (resolves sellerId via renderPageData + solves captcha).
-        const local = await scrapeSellerLocal(storeId, log, config, knownSellerId).catch((error) => {
-            log.warning('Seller scrape failed — skipping seller (product unaffected).', {
-                error: error instanceof Error ? error.message : String(error),
-            });
-            return null;
-        });
-        return local ? local.seller : null;
-    })();
-    sellerCache.set(storeId, sellerPromise);
-    return sellerPromise;
-}
-
-/**
- * Build the Playwright router: the product handler extracts everything from the `pdp.pc.query` MTOP
- * JSON (see {@link fetchPdpDirect}) plus the reviews API and description endpoint — no page DOM is
- * scraped. The page is navigated only to bootstrap the anti-bot cookies the signed API call needs.
+ * The handler stays thin: it owns the Crawlee-session-specific rotation (`rotateAndRetry`), while the
+ * extraction itself is identical to the standby warm-pool path. Batch uses the `inline-then-local`
+ * seller strategy (slow local fallback allowed) and the interceptor fallback (it navigated to the PDP).
  *
  * A factory (rather than a module-level singleton) so the handler can read the resolved
  * {@link ScraperConfig} — capture mode, proxy country — without reaching for globals.
@@ -131,83 +62,21 @@ export function createRouter(config: ScraperConfig) {
             rotateAndRetry(ctx, arrival);
         }
 
-        const response = createAliExpressResponse(request.url);
-        response.captureMode = config.mode;
-
-        // Fire the signed pdp.pc.query ourselves (no bundle wait). Fall back to the page's own
-        // intercepted response if the direct call returns nothing. A block means neither yields JSON
-        // → rotate cheaply (each attempt is seconds, not a full render).
-        let result = await fetchPdpDirect(page, response.product.id, log);
-        if (!result) {
-            result = await waitForPdpResult(page, 8_000);
-        }
-        if (!result) {
-            const status = await classifyPage(page);
-            rotateAndRetry(ctx, status === 'ok' ? 'pdp-timeout' : status);
-        }
-
         log.info('product handler pass', { requestId: request.id, retryCount: request.retryCount, pageUrl: page.url() });
 
-        const parsed = parsePdpResult(result as Record<string, unknown>);
-        if (!parsed.title) {
-            log.warning('pdp.pc.query JSON had no title — rotating.', { url: page.url() });
-            rotateAndRetry(ctx, 'empty-product');
-        }
-
-        response.product.title = parsed.title as string;
-        response.product.pricing = parsed.pricing;
-        response.product.media = parsed.media;
-        response.product.specifications = parsed.specifications;
-        response.product.stock = parsed.stock;
-        response.product.shipping = parsed.shipping;
-        response.sellerRef = parsed.sellerRef;
-        log.info('product parsed', {
-            images: parsed.media.images.length,
-            videos: parsed.media.videos.length,
-            specs: parsed.specifications.length,
-            currency: parsed.pricing.currency,
-            priceMin: parsed.pricing.priceMin,
-            priceMax: parsed.pricing.priceMax,
-            availableQuantity: parsed.stock.availableQuantity,
-            deliveryTimeText: parsed.shipping.deliveryTimeText,
+        const { response, blocked, blockReason } = await extractProduct(page, request.url, config, log, sellerCache, {
+            sellerStrategy: 'inline-then-local',
+            interceptorFallback: true,
         });
-
-        // Seller scrape runs concurrently (uses sellerRef from the JSON). product_only skips it.
-        const sellerPromise = kickoffSellerScrape(page, response, config, log, sellerCache);
-
-        // Description — fetched from the URL embedded in the JSON, then cleaned.
-        response.product.description = await fetchDescription(page, parsed.descUrl, log);
-        log.info('description extracted', {
-            htmlLength: response.product.description.html.length,
-            plainTextLength: response.product.description.plainText.length,
-        });
-
-        // Reviews — `mtop.aliexpress.review.pc.list`: overall rating, per-star breakdown, samples.
-        // Fired in PARALLEL via the request context (the `_m_h5_tk` token is already warm from the
-        // pdp.pc.query call). Leaves the empty default if the API yields nothing.
-        const sellerSeq = response.sellerRef?.platformSellerId ?? null;
-        const apiReviews = response.product.id ? await collectReviewsViaRequest(page, response.product.id, sellerSeq, log, 5) : null;
-        if (apiReviews) {
-            response.product.reviewsSummary = apiReviews;
-        }
-        // Reviews API can be empty on some products; fall back to the rating from PC_RATING.
-        if (response.product.reviewsSummary.rating == null && parsed.ratingFallback.rating != null) {
-            response.product.reviewsSummary.rating = parsed.ratingFallback.rating;
-            response.product.reviewsSummary.reviewCount = parsed.ratingFallback.reviewCount;
-        }
-        log.info('reviews extracted', {
-            rating: response.product.reviewsSummary.rating,
-            reviewCount: response.product.reviewsSummary.reviewCount,
-            samples: response.product.reviewsSummary.reviewSamples.length,
-        });
-
-        // Await the seller scrape kicked off earlier; by now it has overlapped extraction + reviews,
-        // so it usually resolves immediately. null = scrape failed/skipped.
-        if (sellerPromise) {
-            const seller = await sellerPromise;
-            if (seller) {
-                response.seller = seller;
+        if (blocked) {
+            // `pdp-blocked` may actually be a captcha/punish overlay — reclassify for an accurate tally
+            // (an 'ok' classification with no JSON means the signed call timed out, not a hard block).
+            let reason = blockReason ?? 'empty-product';
+            if (blockReason === 'pdp-blocked') {
+                const status = await classifyPage(page);
+                reason = status === 'ok' ? 'pdp-timeout' : status;
             }
+            rotateAndRetry(ctx, reason);
         }
 
         await pushData(response);
