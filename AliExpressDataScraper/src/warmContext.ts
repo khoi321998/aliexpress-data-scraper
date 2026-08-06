@@ -82,7 +82,8 @@ export async function bootstrapWarmContext(
     config: ScraperConfig,
     log: Log,
 ): Promise<WarmContext | null> {
-    const sessionId = `standby-${randomBytes(8).toString('hex')}`;
+    // Apify proxy session IDs must match /^[\w._~]+$/ — no hyphens allowed, so use an underscore.
+    const sessionId = `standby_${randomBytes(8).toString('hex')}`;
     const proxyUrl = await proxyConfiguration.newUrl(sessionId);
     if (!proxyUrl) {
         log.warning('Warm bootstrap: proxy configuration returned no URL.', { sessionId });
