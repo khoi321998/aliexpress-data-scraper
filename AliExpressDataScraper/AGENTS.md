@@ -95,6 +95,19 @@ Actor.on('aborting', async () => {
 
 ## Standby Mode
 
+> **PROJECT DECISION (2026-08-06) — standby is intentionally OFF for this Actor. Do not re-enable it.**
+>
+> This is the "specific documented reason" the rule below asks for. The owner ran this Actor as a
+> batch scraper (`startUrls` in → dataset out) and standby was added without being requested, in
+> commit `2d59dfc`. It broke the batch path on the platform, because Apify sets `ACTOR_STANDBY_PORT`
+> on **every** run of a standby-enabled Actor — so the run started an HTTP server and never crawled.
+> It was removed in full: `standbyServer.ts`, `warmPool.ts`, `warmContext.ts`, the `isStandby` branch
+> in `main.ts`, and `usesStandbyMode` / `webServerMountPath` in `.actor/actor.json`.
+>
+> Only the Actor owner may reverse this. If you think standby is warranted, ask first — do not add it
+> as a side effect of another change. If it is ever re-enabled, detect it with
+> `process.env.APIFY_META_ORIGIN === 'STANDBY'`, never with `ACTOR_STANDBY_PORT`.
+
 - **NEVER disable standby mode (`usesStandbyMode: false`) in `.actor/actor.json` without explicit permission** - Actor Standby mode solves this problem by letting you have the Actor ready in the background, waiting for the incoming HTTP requests. In a sense, the Actor behaves like a real-time web server or standard API server instead of running the logic once to process everything in batch. Always keep `usesStandbyMode: true` unless there is a specific documented reason to disable it
 - **ALWAYS implement readiness probe handler for standby Actors** - Handle the `x-apify-container-server-readiness-probe` header at GET / endpoint to ensure proper Actor lifecycle management
 

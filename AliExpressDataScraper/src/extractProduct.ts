@@ -1,14 +1,13 @@
-// Shared single-product extraction — the one code path used by BOTH the batch crawler
-// (`routes.ts` default handler) and the standby warm-pool server (`standbyServer.ts`).
+// Single-product extraction — the code path behind the batch crawler's default handler
+// (`routes.ts`).
 //
 // Everything here works on a plain Playwright `Page` via the page's request context
-// (`page.request`) — no Crawlee request-handler state. A warm page that has already bootstrapped
-// the anti-bot cookies + `_m_h5_tk` token can run this repeatedly for many products with NO
-// re-navigation (the standby path); the batch path navigates per product first, then calls in here.
+// (`page.request`) — no Crawlee request-handler state. The caller navigates to the product first
+// (to bootstrap the anti-bot cookies + `_m_h5_tk` token), then calls in here; all data comes from
+// AliExpress's signed APIs, never from the page DOM.
 //
-// Unlike the old inline handler, this NEVER throws to rotate the session: it RETURNS
-// `{ blocked: true, blockReason }` at each block point and lets the caller decide how to rotate
-// (Crawlee `session.retire()` for batch; warm-context recycle for standby).
+// This NEVER throws to rotate the session: it RETURNS `{ blocked: true, blockReason }` at each
+// block point and lets the caller decide how to rotate (Crawlee `session.retire()`).
 import type { Log } from 'apify';
 import type { Page } from 'playwright';
 
@@ -21,17 +20,15 @@ import { normalizeAliExpressStoreUrl } from './url.js';
 
 /** How the seller profile is enriched. */
 export type SellerStrategy =
-    | 'inline-only' // standby: inline API on the warm page only; on block → seller=null (low latency).
-    | 'inline-then-local'; // batch: inline first, fall back to a local (no-proxy) browser + 2captcha.
+    | 'inline-only' // inline API on the current page only; on block → seller=null (low latency).
+    | 'inline-then-local'; // inline first, fall back to a local (no-proxy) browser + 2captcha.
 
-/** Options that differ between the batch and standby callers. */
+/** Knobs the caller tunes per extraction pass. */
 export interface ExtractOptions {
     sellerStrategy: SellerStrategy;
     /**
      * Whether to fall back to the page's intercepted pdp.pc.query response when the direct call
-     * yields nothing. Only useful when the page actually navigated to the PDP (batch). In standby
-     * the page sits on the home page (never the PDP), so the interceptor can't help — skipping the
-     * fallback avoids an 8s wait before we rotate.
+     * yields nothing. Only useful when the page actually navigated to the PDP.
      */
     interceptorFallback: boolean;
 }
@@ -58,8 +55,8 @@ function storeIdFromRef(url: string | null, platformSellerId: string | null): st
  * Fast path: when the PDP gave us the real sellerId (`adminSeq`), fetch the seller INLINE on the
  * product page via APIs — no separate browser, no navigation, no captcha. If that comes back blocked
  * and the strategy allows it, fall back to a dedicated local (no-proxy) browser that solves the
- * captcha. `inline-only` (standby) NEVER takes that slow fallback — it returns null instead, keeping
- * single-call latency low. Caches the PROMISE (not the result) keyed by store id.
+ * captcha. `inline-only` NEVER takes that slow fallback — it returns null instead, keeping latency
+ * low. Caches the PROMISE (not the result) keyed by store id.
  */
 function kickoffSellerScrape(
     page: Page,
@@ -99,7 +96,7 @@ function kickoffSellerScrape(
             if (inline && !inline.blocked) {
                 return inline.seller;
             }
-            // Standby: never pay the slow local-browser + 2captcha fallback — keep latency low.
+            // `inline-only`: never pay the slow local-browser + 2captcha fallback — keep latency low.
             if (sellerStrategy === 'inline-only') {
                 log.info('Inline seller fetch blocked/empty — skipping (inline-only strategy).');
                 return null;
@@ -122,8 +119,8 @@ function kickoffSellerScrape(
 /**
  * Extract one product (title, pricing, media, specs, stock, shipping, description, reviews) plus —
  * in `product_and_seller` mode — the seller profile, all from AliExpress's signed APIs via the
- * given page's request context. The page must already be on (batch) or warm for (standby) the
- * target product. Never throws on a block: returns `{ blocked: true }` for the caller to rotate.
+ * given page's request context. The page must already be on the target product with its anti-bot
+ * cookies warm. Never throws on a block: returns `{ blocked: true }` for the caller to rotate.
  */
 export async function extractProduct(
     page: Page,

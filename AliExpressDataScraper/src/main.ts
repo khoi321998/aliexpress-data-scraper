@@ -11,7 +11,6 @@ import { buildConfig } from './config.js';
 import { armPdpInterceptor } from './productApi.js';
 import { createRouter, rotationStats } from './routes.js';
 import { runSellerOnly } from './sellerPipeline.js';
-import { runStandby } from './standbyServer.js';
 import { applyRegionOverrides, applyStealthInitScript, CHROME_LAUNCH_ARGS, FINGERPRINT_OPTIONS } from './stealth.js';
 import { normalizeAliExpressUrl } from './url.js';
 
@@ -29,15 +28,6 @@ await Actor.init();
 const input = (await Actor.getInput<ScraperInput>()) ?? ({} as ScraperInput);
 const config = buildConfig(input);
 log.info('Resolved scraper config.', { ...config });
-
-// Standby mode: serve one product per HTTP call from a pool of warm browser contexts. Triggered by
-// the platform-set `ACTOR_STANDBY_PORT` (or `mode: standby` locally). It owns its own abort handling
-// and never returns, so we branch BEFORE the batch-only `startUrls` check and crawler wiring below.
-const isStandby = Boolean(process.env.ACTOR_STANDBY_PORT) || input.mode === 'standby';
-if (isStandby) {
-    await runStandby(config);
-    await Actor.exit();
-}
 
 if (!input.startUrls?.length) {
     throw new Error('Input "startUrls" must contain at least one AliExpress URL.');

@@ -39,9 +39,9 @@ function rotateAndRetry(
  * anti-bot cookies, then defers to the shared {@link extractProduct} (which extracts everything from
  * the signed `pdp.pc.query` MTOP JSON + reviews + description + seller — no page DOM is scraped).
  *
- * The handler stays thin: it owns the Crawlee-session-specific rotation (`rotateAndRetry`), while the
- * extraction itself is identical to the standby warm-pool path. Batch uses the `inline-then-local`
- * seller strategy (slow local fallback allowed) and the interceptor fallback (it navigated to the PDP).
+ * The handler stays thin: it owns the Crawlee-session-specific rotation (`rotateAndRetry`) and defers
+ * the rest. It uses the `inline-then-local` seller strategy (slow local fallback allowed) and the
+ * interceptor fallback (it navigated to the PDP, so the intercepted response is usable).
  *
  * A factory (rather than a module-level singleton) so the handler can read the resolved
  * {@link ScraperConfig} — capture mode, proxy country — without reaching for globals.

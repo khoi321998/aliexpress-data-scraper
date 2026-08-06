@@ -36,23 +36,7 @@
             "description": "API key for 2captcha (https://2captcha.com). Used by \"Seller only\" mode to solve reCAPTCHA punish pages. Falls back to the TWOCAPTCHA_API_KEY environment variable if left empty.",
             "editor": "textfield",
             "isSecret": true
-        },
-        "standbyPoolSize": {
-            "title": "Standby: Warm Pool Size",
-            "type": "integer",
-            "description": "Standby mode only. Number of warm browser contexts (each a sticky residential IP + fingerprint) kept alive between HTTP calls. Also caps how many calls run in parallel. Keep small — each context is a full Chrome.",
-            "default": 3,
-            "minimum": 2,
-            "maximum": 4
-        },
-        "standbyMaxUsageCount": {
-            "title": "Standby: Max Uses per Context",
-            "type": "integer",
-            "description": "Standby mode only. Recycle a warm context (retire its IP + mint a fresh one) after it has served this many requests, so no single residential IP is over-used.",
-            "default": 5,
-            "minimum": 1,
-            "maximum": 50
         }
     },
-    "required": []
+    "required": ["startUrls"]
 }

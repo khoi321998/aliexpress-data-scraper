@@ -29,10 +29,6 @@ export interface ScraperInput {
     headless?: boolean;
     /** 2captcha API key used by the `seller_only` pipeline to solve reCAPTCHA punish pages. */
     twoCaptchaApiKey?: string;
-    /** Standby: number of warm browser contexts to keep alive (== max simultaneous calls). */
-    standbyPoolSize?: number;
-    /** Standby: recycle a warm context after this many served requests. */
-    standbyMaxUsageCount?: number;
 }
 
 /** Fully-resolved configuration consumed by the crawler. */
@@ -71,19 +67,6 @@ export interface ScraperConfig {
 
     /** Refresh the browser (and thus its fingerprint) after this many pages. */
     retireBrowserAfterPageCount: number;
-
-    /** Standby warm-pool settings (used only by the standby HTTP entry path). */
-    standby: {
-        /** Target number of warm contexts == max simultaneous in-flight calls. */
-        poolSize: number;
-        /** Recycle a warm context after this many served requests. */
-        maxUsageCount: number;
-    };
-}
-
-function asPositiveInt(value: unknown, fallback: number): number {
-    const n = typeof value === 'number' ? value : Number(value);
-    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback;
 }
 
 /**
@@ -123,10 +106,5 @@ export function buildConfig(input: ScraperInput): ScraperConfig {
             maxErrorScore: 1,
         },
         retireBrowserAfterPageCount: 5,
-        standby: {
-            // Clamp pool size to 2–4 (a few concurrent calls); each warm context is a full Chrome.
-            poolSize: Math.min(4, Math.max(2, asPositiveInt(input.standbyPoolSize, 3))),
-            maxUsageCount: asPositiveInt(input.standbyMaxUsageCount, 5) || 5,
-        },
     };
 }
