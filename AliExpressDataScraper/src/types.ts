@@ -23,6 +23,38 @@ export interface ProductSellerResponse {
     seller: Seller | null;
     technical: Technical;
     sellerTechnical: SellerTechnical | null;
+    /** Health of this record's extraction — see {@link ExtractionReport}. Filled just before push. */
+    extraction: ExtractionReport;
+}
+
+// --- Extraction health ---------------------------------------------------------------------------
+
+/** `critical` = the record cannot have parsed correctly without it; `warning` = usually present. */
+export type ExtractionSeverity = 'critical' | 'warning';
+
+export type ExtractionStatus = 'ok' | 'degraded' | 'broken';
+
+/**
+ * One expected-but-absent field: what is missing, and the source it should have come from.
+ *
+ * Deliberately just those two — whether the value arrived as `null` or `''` says nothing a reader
+ * can act on; both mean the source stopped yielding it, and the fix is the same either way. Since
+ * this scraper reads AliExpress's signed JSON APIs rather than the DOM, `source` names the API and
+ * the JSON property path (`pdp.pc.query → PRODUCT_TITLE.text`); an absent field there almost always
+ * means AliExpress renamed or moved that property.
+ */
+export interface ExtractionIssue {
+    field: string;
+    source?: string;
+}
+
+export interface ExtractionReport {
+    /** `broken` if any critical field is absent, `degraded` if only warnings, else `ok`. */
+    status: ExtractionStatus;
+    /** How many declared checks actually applied to this record (mode-dependent). */
+    checkedFields: number;
+    missingFields: string[];
+    issues: ExtractionIssue[];
 }
 
 export interface Product {

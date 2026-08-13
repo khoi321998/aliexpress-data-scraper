@@ -10,9 +10,10 @@
 // `scrapeSellerData` (`sellerProfile.ts`), reused by the `product_and_seller` flow. This file just
 // drives the dedicated crawler and emits the main `ProductSellerResponse` DTO with `product: null`.
 import { createPlaywrightRouter,PlaywrightCrawler } from '@crawlee/playwright';
-import { Actor, log } from 'apify';
+import { log } from 'apify';
 
 import type { ScraperConfig, ScraperInput } from './config.js';
+import { pushRecord } from './pushRecord.js';
 import { createSellerOnlyResponse } from './response.js';
 import { armSellerIdInterceptor } from './sellerApi.js';
 import { scrapeSellerData } from './sellerProfile.js';
@@ -48,7 +49,7 @@ function createSellerRouter(config: ScraperConfig) {
         if (response.sellerRef) {
             response.sellerRef.name = seller.name;
         }
-        await Actor.pushData(response);
+        await pushRecord(response, reqLog);
     });
 
     return router;

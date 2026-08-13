@@ -6,7 +6,7 @@
         "overview": {
             "title": "Overview",
             "transformation": {
-                "fields": ["title", "url"]
+                "fields": ["title", "url", "extraction.status"]
             },
             "display": {
                 "component": "table",
@@ -18,6 +18,42 @@
                     "url": {
                         "label": "URL",
                         "format": "link"
+                    },
+                    "extraction.status": {
+                        "label": "Extraction",
+                        "format": "text"
+                    }
+                }
+            }
+        },
+        "extractionHealth": {
+            "title": "Extraction health",
+            "description": "Which expected fields came back absent. A row that is not `ok` usually means AliExpress renamed or moved a JSON property in one of the APIs this Actor reads.",
+            "transformation": {
+                "fields": ["url", "captureMode", "extraction.status", "extraction.missingFields", "extraction.checkedFields"]
+            },
+            "display": {
+                "component": "table",
+                "properties": {
+                    "url": {
+                        "label": "URL",
+                        "format": "link"
+                    },
+                    "captureMode": {
+                        "label": "Mode",
+                        "format": "text"
+                    },
+                    "extraction.status": {
+                        "label": "Status",
+                        "format": "text"
+                    },
+                    "extraction.missingFields": {
+                        "label": "Missing fields",
+                        "format": "array"
+                    },
+                    "extraction.checkedFields": {
+                        "label": "Fields checked",
+                        "format": "number"
                     }
                 }
             }

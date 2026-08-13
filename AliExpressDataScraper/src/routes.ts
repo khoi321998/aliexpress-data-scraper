@@ -4,6 +4,7 @@ import { createPlaywrightRouter } from '@crawlee/playwright';
 import type { ScraperConfig } from './config.js';
 import { classifyPage } from './detection.js';
 import { extractProduct } from './extractProduct.js';
+import { pushRecord } from './pushRecord.js';
 import type { Seller } from './types.js';
 
 /**
@@ -54,7 +55,7 @@ export function createRouter(config: ScraperConfig) {
     const sellerCache = new Map<string, Promise<Seller | null>>();
 
     router.addDefaultHandler(async (ctx) => {
-        const { request, page, log, pushData } = ctx;
+        const { request, page, log } = ctx;
 
         // Hard block on arrival → rotate immediately.
         const arrival = await classifyPage(page);
@@ -79,7 +80,7 @@ export function createRouter(config: ScraperConfig) {
             rotateAndRetry(ctx, reason);
         }
 
-        await pushData(response);
+        await pushRecord(response, log);
         log.info('extracted successfully', { requestId: request.id, retryCount: request.retryCount });
     });
 

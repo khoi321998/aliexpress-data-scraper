@@ -1,3 +1,4 @@
+import { emptyExtractionReport } from './extractionAudit.js';
 import type { Product, ProductSellerResponse, Technical } from './types.js';
 import { extractAliExpressItemId } from './url.js';
 
@@ -99,6 +100,8 @@ export function createAliExpressResponse(url: string): ProductSellerResponse & {
         seller: null,
         technical: emptyTechnical(),
         sellerTechnical: null,
+        // Filled in by `pushRecord` right before the record enters the dataset.
+        extraction: emptyExtractionReport(),
     };
 }
 
@@ -124,5 +127,7 @@ export function createSellerOnlyResponse(storeUrl: string, storeId: string): Pro
         seller: null,
         technical: emptyTechnical(),
         sellerTechnical: null,
+        // Filled in by `pushRecord` right before the record enters the dataset.
+        extraction: emptyExtractionReport(),
     };
 }
