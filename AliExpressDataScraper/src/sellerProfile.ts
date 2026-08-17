@@ -28,17 +28,26 @@ import { fetchSellerReviews } from './sellerReviewsApi.js';
 import type { Seller, SellerProductPreview, SellerReviewSample } from './types.js';
 import { storeAllItemsUrl } from './url.js';
 
-/** Map the API-fetched pieces into the shared {@link Seller} DTO (extra fields ride the index signature). */
+/**
+ * Map the API-fetched pieces into the shared {@link Seller} DTO (extra fields ride the index signature).
+ *
+ * `fallbackStoreName` is the name lifted from renderPageData. `seller.page.info` stays the primary
+ * source (it also carries country / logo / followers / credibility), but it answers `SUCCESS` with an
+ * empty `data` for some stores — fully-managed ONE_STOP_SERVICE ones in particular — and then `info`
+ * is null. renderPageData is fetched anyway to resolve the sellerId, so using its name costs nothing
+ * and keeps `name` populated where the profile endpoint has nothing to say.
+ */
 export function buildSellerDto(
     pathId: string,
     sellerId: string | null,
     info: SellerInfo | null,
     sellerReviews: SellerReviewSample[],
     productPreviews: SellerProductPreview[],
+    fallbackStoreName: string | null = null,
 ): Seller {
     return {
         platformSellerId: sellerId ?? pathId,
-        name: info?.storeName ?? null,
+        name: info?.storeName ?? fallbackStoreName ?? null,
         url: `https://www.aliexpress.com/store/${pathId}`,
         countryName: info?.countryName ?? null,
         followersText: info?.followersText ?? null,
@@ -153,7 +162,7 @@ export async function scrapeSellerData(
         fetchSellerProducts(page, sellerId, pathId, log, apiOpts, 10, 10),
     ]);
 
-    const seller = buildSellerDto(pathId, sellerId, info, sellerReviews, productPreviews);
+    const seller = buildSellerDto(pathId, sellerId, info, sellerReviews, productPreviews, resolved.storeName);
     log.info('🏪 seller scraped (API)', {
         pathId,
         sellerId,

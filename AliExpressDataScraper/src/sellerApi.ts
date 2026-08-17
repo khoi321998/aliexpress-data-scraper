@@ -172,6 +172,27 @@ export interface ResolvedStore {
 /** Per-page holder for the intercepted renderPageData result (latest valid wins, e.g. post-captcha reload). */
 const sellerIdWaiters = new WeakMap<Page, { resolved: ResolvedStore | null }>();
 
+/**
+ * Find the store name in a parsed renderPageData payload.
+ *
+ * `globalData` carries the ids but usually NOT the name — the name lives on the shop-head component
+ * (`pageData.components.<numeric id>.moduleData.storeName`, the module that renders the store header).
+ * Check globalData first, then scan the components for the first non-empty `moduleData.storeName`.
+ */
+function findStoreName(pageData: Record<string, unknown>): string | null {
+    const fromGlobal = toStr(asRecord(pageData.globalData).storeName);
+    if (fromGlobal) {
+        return fromGlobal;
+    }
+    for (const component of Object.values(asRecord(pageData.components))) {
+        const name = toStr(asRecord(asRecord(component).moduleData).storeName);
+        if (name) {
+            return name;
+        }
+    }
+    return null;
+}
+
 /** Strip the JSONP wrapper, parse, and lift `globalData.sellerId` (+ shopId / storeName). */
 export function extractStoreFromRenderPageData(body: string): ResolvedStore | null {
     // Punish/recaptcha bodies have no globalData — bail fast.
@@ -180,13 +201,14 @@ export function extractStoreFromRenderPageData(body: string): ResolvedStore | nu
     }
     try {
         const json = JSON.parse(body.replace(/^\s*\w+\(/, '').replace(/\)\s*;?\s*$/, ''));
-        const globalData = asRecord(asRecord(asRecord(asRecord(json).result).pageData).globalData);
+        const pageData = asRecord(asRecord(asRecord(json).result).pageData);
+        const globalData = asRecord(pageData.globalData);
         const sellerId = globalData.sellerId ?? globalData.bizId;
         if (sellerId != null && String(sellerId).trim() !== '') {
             return {
                 sellerId: String(sellerId),
                 shopId: globalData.shopId != null ? String(globalData.shopId) : null,
-                storeName: toStr(globalData.storeName),
+                storeName: findStoreName(pageData),
             };
         }
     } catch {
