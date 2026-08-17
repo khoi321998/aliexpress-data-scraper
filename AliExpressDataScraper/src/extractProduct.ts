@@ -31,6 +31,12 @@ export interface ExtractOptions {
      * yields nothing. Only useful when the page actually navigated to the PDP.
      */
     interceptorFallback: boolean;
+    /**
+     * Ship-to country (ISO-3166 alpha-2) for the MTOP payloads. MUST match the `region` already set
+     * in the page's `aep_usuc_f` cookie — a mismatch makes AliExpress answer for neither region.
+     * Defaults to `US` when the caller has no per-request region.
+     */
+    shipToCountry?: string;
 }
 
 /** Outcome of one extraction pass. */
@@ -132,10 +138,11 @@ export async function extractProduct(
 ): Promise<ExtractResult> {
     const response = createAliExpressResponse(url);
     response.captureMode = config.mode;
+    const shipToCountry = opts.shipToCountry ?? config.defaultShipToCountry;
 
     // Fire the signed pdp.pc.query ourselves (no bundle wait). Optionally fall back to the page's own
     // intercepted response (batch only). A block means neither yields JSON → rotate cheaply.
-    let result = await fetchPdpDirect(page, response.product.id, log);
+    let result = await fetchPdpDirect(page, response.product.id, log, shipToCountry);
     if (!result && opts.interceptorFallback) {
         result = await waitForPdpResult(page, 8_000);
     }
@@ -179,7 +186,7 @@ export async function extractProduct(
 
     // Reviews — fired in PARALLEL via the request context (token already warm from pdp.pc.query).
     const sellerSeq = response.sellerRef?.platformSellerId ?? null;
-    const apiReviews = response.product.id ? await collectReviewsViaRequest(page, response.product.id, sellerSeq, log, 5) : null;
+    const apiReviews = response.product.id ? await collectReviewsViaRequest(page, response.product.id, sellerSeq, log, 5, shipToCountry) : null;
     if (apiReviews) {
         response.product.reviewsSummary = apiReviews;
     }

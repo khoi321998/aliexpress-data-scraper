@@ -24,6 +24,18 @@
                 }
             ]
         },
+        "shipToCountry": {
+            "title": "Ship To Country",
+            "type": "string",
+            "description": "Two-letter country code (ISO 3166-1 alpha-2, e.g. ES, DE, VN) to use as the delivery destination for every URL. Some listings are only available for certain destinations and return an error when queried for the US. The scraper also routes its proxy through this country, so the delivery address and the connection agree. Leave empty to auto-detect per URL from the address you pasted (e.g. https://es.aliexpress.com/... or ?gatewayAdapt=glo2esp becomes Spain), falling back to US when the URL carries no region.",
+            "editor": "textfield"
+        },
+        "residentialProxy": {
+            "title": "Use Residential Proxy",
+            "type": "boolean",
+            "description": "Route ALL traffic through Apify's residential proxy instead of the cheaper datacenter pool. Deliveries outside the US already use residential automatically, because the datacenter pool only holds US addresses. Turn this on to use residential for US deliveries too — datacenter addresses are recognised and challenged by AliExpress far more often. Costs more per request.",
+            "default": false
+        },
         "headless": {
             "title": "Headless Browser",
             "type": "boolean",

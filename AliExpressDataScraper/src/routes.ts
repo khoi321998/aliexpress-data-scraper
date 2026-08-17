@@ -63,11 +63,16 @@ export function createRouter(config: ScraperConfig) {
             rotateAndRetry(ctx, arrival);
         }
 
-        log.info('product handler pass', { requestId: request.id, retryCount: request.retryCount, pageUrl: page.url() });
+        // Ship-to was resolved from the raw start URL in `main.ts` and rides on `userData`; the same
+        // value already went into the `aep_usuc_f` cookie via the preNavigationHook, and now has to
+        // match the `country` we sign into the MTOP payloads.
+        const shipToCountry = (request.userData?.shipToCountry as string | undefined) ?? config.defaultShipToCountry;
+        log.info('product handler pass', { requestId: request.id, retryCount: request.retryCount, pageUrl: page.url(), shipToCountry });
 
         const { response, blocked, blockReason } = await extractProduct(page, request.url, config, log, sellerCache, {
             sellerStrategy: 'inline-then-local',
             interceptorFallback: true,
+            shipToCountry,
         });
         if (blocked) {
             // `pdp-blocked` may actually be a captcha/punish overlay — reclassify for an accurate tally

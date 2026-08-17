@@ -7,7 +7,7 @@ import { Actor, log } from 'apify';
 
 import type { ScraperInput } from './config.js';
 // this is an ESM project, so relative imports must include the `.js` extension even from TS.
-import { buildConfig } from './config.js';
+import { buildConfig, proxyGroupsFor, resolveShipToCountry } from './config.js';
 import { armPdpInterceptor } from './productApi.js';
 import { createRouter, rotationStats } from './routes.js';
 import { runSellerOnly } from './sellerPipeline.js';
@@ -53,34 +53,87 @@ if (config.mode === 'seller_only') {
 // Product modes: normalize whatever the user pasted (vi./de./m. subdomains, tracking params, …)
 // to the canonical https://www.aliexpress.com/item/<id>.html, dropping anything unrecognizable
 // and de-duplicating links that point to the same product.
-const productUrls = [
-    ...new Set(
-        input.startUrls.flatMap(({ url }) => {
-            const normalized = normalizeAliExpressUrl(url);
-            if (!normalized) {
-                log.warning(`Skipping non-product AliExpress URL: ${url}`);
-                return [];
-            }
-            if (normalized !== url) {
-                log.info(`Normalized URL: ${url} -> ${normalized}`);
-            }
-            return [normalized];
-        }),
-    ),
-];
-if (!productUrls.length) {
+//
+// Ship-to is resolved from the RAW url FIRST, because normalization drops the query string those
+// signals can live in — and it then decides which storefront host the normalized URL points at, so
+// the URL we crawl names the same country as the proxy, the timezone and the region cookie. It
+// rides on `userData` so each request carries its own region: a run can legitimately mix `es.` and
+// `www.` start URLs, and the same item under two regions is two distinct requests.
+const productRequests = new Map<string, { url: string; userData: { shipToCountry: string } }>();
+for (const { url } of input.startUrls) {
+    const shipToCountry = resolveShipToCountry(url, config);
+    const normalized = normalizeAliExpressUrl(url, shipToCountry);
+    if (!normalized) {
+        log.warning(`Skipping non-product AliExpress URL: ${url}`);
+        continue;
+    }
+    if (normalized !== url) {
+        log.info(`Normalized URL: ${url} -> ${normalized}`, { shipToCountry });
+    }
+    // First occurrence wins, so a duplicated product keeps the region it was first seen with.
+    if (!productRequests.has(normalized)) {
+        productRequests.set(normalized, { url: normalized, userData: { shipToCountry } });
+    }
+}
+if (!productRequests.size) {
     throw new Error('No valid AliExpress product URLs found in "startUrls".');
 }
-const requests = productUrls.map((url) => ({ url }));
+const requests = [...productRequests.values()];
+log.info('Resolved ship-to per product URL.', Object.fromEntries([...productRequests].map(([u, r]) => [u, r.userData.shipToCountry])));
 
-// TEST: Apify DATACENTER proxy (default automatic pool — no groups), matching the rented Actor's
-// `proxy: {useApifyProxy: true}`. Datacenter is far lower-latency than residential, so each attempt
-// is cheap; we accept a higher block rate and lean on fast rotate-and-retry. Revert to
-// `{ groups: ['RESIDENTIAL'], countryCode: config.proxyCountry }` for the clean residential path.
+/**
+ * The ship-to country a request was tagged with in the loop above. Falls back to the default for
+ * anything untagged (e.g. the proxy warm-up call Crawlee makes with no request in hand).
+ */
+function shipToOf(request?: { userData?: Record<string, unknown> }): string {
+    const tagged = request?.userData?.shipToCountry;
+    return typeof tagged === 'string' && tagged ? tagged : config.defaultShipToCountry;
+}
+
+/**
+ * Recover the exit country from an Apify proxy URL, whose username encodes it as `country-ES`
+ * (see `ProxyConfiguration._getUsername`). Used where a browser is in scope but its request is not.
+ */
+function countryFromProxyUrl(proxyUrl?: string): string {
+    return proxyUrl?.match(/country-([A-Za-z]{2})/)?.[1]?.toUpperCase() ?? config.defaultShipToCountry;
+}
+
+// --- Proxy: exit in the country we ship to ------------------------------------------------------
+//
+// Ship-to and proxy country MUST agree. Forcing `region=ES` in the locale cookie while exiting from
+// a US IP is a combination no real buyer produces, and AliExpress answers it with a wall of
+// captchas — so instead of one fixed country, each request leaves through its OWN ship-to country.
+//
+// Mechanically: `newUrlFunction` is called per request with that request in hand (Crawlee calls
+// `newProxyInfo(sessionId, { request })` for every page), and browser-pool keys browsers by proxy
+// URL — so a mixed-region run transparently gets one browser per country instead of one shared
+// browser on the wrong IP. `newUrlFunction` cannot be combined with `countryCode`, so we delegate
+// to a real per-country ProxyConfiguration (which also handles the proxy-password bootstrap).
+const proxyByCountry = new Map<string, Awaited<ReturnType<typeof Actor.createProxyConfiguration>>>();
+async function proxyForCountry(country: string) {
+    if (!proxyByCountry.has(country)) {
+        const groups = proxyGroupsFor(country, config);
+        proxyByCountry.set(
+            country,
+            await Actor.createProxyConfiguration({
+                countryCode: country,
+                ...(groups.length ? { groups } : {}),
+            }),
+        );
+        log.info(`Proxy country added: ${country}`, { groups: groups.length ? groups : ['auto (datacenter)'] });
+    }
+    return proxyByCountry.get(country);
+}
+
 const proxyConfiguration = await Actor.createProxyConfiguration({
-    countryCode: config.proxyCountry,
+    newUrlFunction: async (sessionId, options) => {
+        const country = shipToOf(options?.request);
+        const perCountry = await proxyForCountry(country);
+        // Suffix the session id with the country so one Crawlee session can never be handed the
+        // same sticky IP for two different regions.
+        return (await perCountry?.newUrl(sessionId ? `${sessionId}_${country}` : undefined)) ?? null;
+    },
 });
-log.info(`Using Apify datacenter proxy (auto, country ${config.proxyCountry}).`);
 
 // Anti-bot strategy is avoidance + rotation only: a captcha/punish/blocked page retires the
 // burned session and retries on a fresh residential IP + fingerprint. We never solve captchas.
@@ -150,30 +203,39 @@ const crawler = new PlaywrightCrawler({
         },
         // Recycle the browser every few pages so a fresh fingerprint is minted periodically.
         retireBrowserAfterPageCount: config.retireBrowserAfterPageCount,
-        // Apply the US region overrides once per browser start (the first page created on a browser
+        // Apply the region overrides once per browser start (the first page created on a browser
         // carries its freshly minted fingerprint). The injector spoofs UA/navigator/headers but not
         // timezone — that comes from `applyRegionOverrides`.
+        //
+        // There's no request in scope here, but browser-pool keys each browser by its proxy URL, so
+        // the browser's OWN proxy country is the authoritative answer — read it back off the URL.
         postPageCreateHooks: [
             async (page, browserController) => {
                 if (loggedBrowsers.has(browserController)) {
                     return;
                 }
                 loggedBrowsers.add(browserController);
-                await applyRegionOverrides(page);
+                await applyRegionOverrides(page, countryFromProxyUrl(browserController.proxyUrl));
             },
         ],
     },
 
     // --- Navigation strategy --------------------------------------------------------------
     preNavigationHooks: [
-        async ({ page }, gotoOptions) => {
+        async ({ page, request }, gotoOptions) => {
             // AliExpress decides the price currency from the `aep_usuc_f` locale cookie (and the proxy
             // IP geo), NOT from the `_currency` field in the pdp.pc.query payload — that field is
             // ignored, so a Swedish residential IP yields SEK prices despite `_currency: 'USD'`. Force
             // the cookie before navigation (same lever the seller pipeline uses) to pin USD regardless
             // of which residential IP we land on. Set on both AliExpress domains we touch (.com for
             // navigation, .us for the acs API host).
-            const localeCookieValue = `site=glo&c_tp=${config.currency}&region=${config.proxyCountry}&b_locale=${config.language}&ae_u_p_s=2`;
+            //
+            // `region` is the ship-to, and it is the one field we do NOT pin globally: a listing the
+            // seller won't ship to the US comes back blocked/empty for a US region no matter how clean
+            // the session is, so we replay the region the start URL came from (see `resolveShipToCountry`).
+            // Currency + language stay USD/en_US so the dataset is comparable across regions.
+            const shipToCountry = shipToOf(request);
+            const localeCookieValue = `site=glo&c_tp=${config.currency}&region=${shipToCountry}&b_locale=${config.language}&ae_u_p_s=2`;
             await page.context().addCookies([
                 { name: 'aep_usuc_f', value: localeCookieValue, domain: '.aliexpress.com', path: '/' },
                 { name: 'intl_locale', value: config.language, domain: '.aliexpress.com', path: '/' },
@@ -202,9 +264,9 @@ const crawler = new PlaywrightCrawler({
                 // eslint-disable-next-line no-param-reassign -- mutating gotoOptions is the documented Crawlee way to set navigation options.
                 gotoOptions.waitUntil = 'commit';
             }
-            // Force US timezone/locale (CDP) so they match the en-US fingerprint + US proxy,
-            // then layer the extra stealth patches. Both run before navigation.
-            await applyRegionOverrides(page);
+            // Force the timezone/locale (CDP) to match this request's proxy exit country, then layer
+            // the extra stealth patches. Both run before navigation.
+            await applyRegionOverrides(page, shipToCountry);
             await applyStealthInitScript(page);
         },
     ],

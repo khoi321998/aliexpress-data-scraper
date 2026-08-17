@@ -1,10 +1,11 @@
 import type { Page } from 'playwright';
 import { describe, expect, it } from 'vitest';
 
-import { buildConfig } from '../src/config.js';
+import { buildConfig, proxyGroupsFor, resolveShipToCountry } from '../src/config.js';
 import { classifyPage, isPunishUrl } from '../src/detection.js';
 import { parsePdpResult } from '../src/productApi.js';
-import { extractAliExpressItemId, normalizeAliExpressUrl } from '../src/url.js';
+import { TIMEZONE_ID, timezoneForCountry } from '../src/stealth.js';
+import { detectShipToCountry, extractAliExpressItemId, normalizeAliExpressUrl } from '../src/url.js';
 
 describe('url normalization', () => {
     it('normalizes locale subdomains and strips tracking params', () => {
@@ -19,6 +20,19 @@ describe('url normalization', () => {
         );
     });
 
+    it('rebuilds the host from the ship-to country, not from what was pasted', () => {
+        expect(normalizeAliExpressUrl('https://es.aliexpress.com/item/1005010204377877.html?gatewayAdapt=glo2esp', 'ES')).toBe(
+            'https://es.aliexpress.com/item/1005010204377877.html',
+        );
+        // A stale/mistyped subdomain loses to the resolved country.
+        expect(normalizeAliExpressUrl('https://m.aliexpress.com/item/1005009982221130.html', 'VN')).toBe(
+            'https://vi.aliexpress.com/item/1005009982221130.html',
+        );
+        expect(normalizeAliExpressUrl('https://es.aliexpress.com/item/123.html', 'US')).toBe('https://www.aliexpress.com/item/123.html');
+        // A country with no localized storefront browses the global one.
+        expect(normalizeAliExpressUrl('https://www.aliexpress.com/item/123.html', 'GB')).toBe('https://www.aliexpress.com/item/123.html');
+    });
+
     it('rejects non-product / non-AliExpress URLs', () => {
         expect(normalizeAliExpressUrl('https://www.aliexpress.com/category/123/phones.html')).toBeNull();
         expect(normalizeAliExpressUrl('https://example.com/item/123.html')).toBeNull();
@@ -30,6 +44,59 @@ describe('url normalization', () => {
             '1005009982221130',
         );
         expect(extractAliExpressItemId('https://example.com/no-item')).toBeNull();
+    });
+});
+
+describe('ship-to detection', () => {
+    it('prefers the gatewayAdapt stamp over the subdomain', () => {
+        expect(detectShipToCountry('https://es.aliexpress.com/item/1005010204377877.html?gatewayAdapt=glo2esp')).toBe('ES');
+        // Subdomain and stamp disagree (user switched region manually) — the stamp wins.
+        expect(detectShipToCountry('https://www.aliexpress.com/item/123.html?gatewayAdapt=glo2deu')).toBe('DE');
+    });
+
+    it('falls back to the locale subdomain', () => {
+        expect(detectShipToCountry('https://es.aliexpress.com/item/1005010204377877.html')).toBe('ES');
+        expect(detectShipToCountry('https://vi.aliexpress.com/item/123.html')).toBe('VN');
+        expect(detectShipToCountry('https://us.aliexpress.com/item/123.html')).toBe('US');
+    });
+
+    it('returns null when the URL carries no region signal', () => {
+        expect(detectShipToCountry('https://www.aliexpress.com/item/123.html')).toBeNull();
+        expect(detectShipToCountry('https://m.aliexpress.com/item/123.html')).toBeNull();
+        expect(detectShipToCountry('https://example.com/item/123.html')).toBeNull();
+        expect(detectShipToCountry('not a url')).toBeNull();
+    });
+
+    it('resolves per URL, with the input override winning over detection', () => {
+        const auto = buildConfig({});
+        expect(resolveShipToCountry('https://es.aliexpress.com/item/123.html', auto)).toBe('ES');
+        // No signal in the URL → the default, NOT a guess from the proxy country.
+        expect(resolveShipToCountry('https://www.aliexpress.com/item/123.html', auto)).toBe('US');
+
+        const forced = buildConfig({ shipToCountry: ' de ' });
+        expect(forced.shipToCountry).toBe('DE');
+        expect(resolveShipToCountry('https://es.aliexpress.com/item/123.html', forced)).toBe('DE');
+    });
+
+    it('presents a timezone consistent with the proxy exit country', () => {
+        // The whole point: no US timezone on a Spanish IP.
+        expect(timezoneForCountry('ES')).toBe('Europe/Madrid');
+        expect(timezoneForCountry('vn')).toBe('Asia/Ho_Chi_Minh');
+        expect(timezoneForCountry('US')).toBe('America/New_York');
+        // Unknown code (only reachable via the manual override) → the US default, never the host's.
+        expect(timezoneForCountry('ZZ')).toBe(TIMEZONE_ID);
+    });
+
+    it('uses residential wherever the datacenter pool has no IPs', () => {
+        const config = buildConfig({});
+        // Datacenter is US-only on this account; ES there is refused at CONNECT with 407.
+        expect(proxyGroupsFor('US', config)).toEqual([]);
+        expect(proxyGroupsFor('ES', config)).toEqual(['RESIDENTIAL']);
+        expect(proxyGroupsFor('vn', config)).toEqual(['RESIDENTIAL']);
+
+        // The input flag forces residential even where datacenter would work.
+        const forced = buildConfig({ residentialProxy: true });
+        expect(proxyGroupsFor('US', forced)).toEqual(['RESIDENTIAL']);
     });
 });
 

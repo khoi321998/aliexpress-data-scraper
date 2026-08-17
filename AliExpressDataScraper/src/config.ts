@@ -10,6 +10,8 @@
 // one. We deliberately do NOT solve captchas — the Alibaba slider is solver-resistant and
 // rotating off a clean residential IP is cheaper and more reliable.
 
+import { detectShipToCountry } from './url.js';
+
 /**
  * What the run captures:
  *   - `product_and_seller`: full product DOM + seller profile (API) + seller/product reviews + previews.
@@ -29,6 +31,16 @@ export interface ScraperInput {
     headless?: boolean;
     /** 2captcha API key used by the `seller_only` pipeline to solve reCAPTCHA punish pages. */
     twoCaptchaApiKey?: string;
+    /**
+     * Force one ship-to country (ISO-3166 alpha-2) for every start URL. Leave empty to auto-detect
+     * it per URL from the locale subdomain / `gatewayAdapt` stamp the user pasted.
+     */
+    shipToCountry?: string;
+    /**
+     * Force the RESIDENTIAL proxy group for EVERY country, including ones the datacenter pool can
+     * serve. Non-US ship-to already uses residential automatically — see {@link proxyGroupsFor}.
+     */
+    residentialProxy?: boolean;
 }
 
 /** Fully-resolved configuration consumed by the crawler. */
@@ -46,8 +58,33 @@ export interface ScraperConfig {
     /** Whole-request budget (navigation + hydration wait + humanization + extraction). */
     requestHandlerTimeoutSecs: number;
     headless: boolean;
-    /** Fixed to "US" — the Apify residential proxy country. */
+    /**
+     * Proxy country for the pipelines that do NOT resolve one per request (the `seller_only`
+     * pipeline, and the seller MTOP payloads). Fixed to "US".
+     *
+     * The product crawler does NOT use this: it exits the proxy in the SAME country it ships to,
+     * resolved per request — see {@link shipToCountry}.
+     */
     proxyCountry: string;
+    /** Force RESIDENTIAL everywhere, even for countries the datacenter pool can serve. */
+    residentialProxy: boolean;
+    /**
+     * Countries the Apify DATACENTER pool actually holds IPs in. Anything outside this list has to
+     * go through RESIDENTIAL — see {@link proxyGroupsFor}.
+     */
+    datacenterCountries: string[];
+
+    /**
+     * Explicit ship-to override (ISO-3166 alpha-2) applied to every URL, or `null` to auto-detect
+     * per URL.
+     *
+     * This drives BOTH the `aep_usuc_f` region cookie AND the proxy exit country. Splitting them
+     * (ES ship-to over a US IP) is what AliExpress punishes hardest: a US datacenter IP asking for
+     * Spanish delivery is a contradiction no real buyer produces, and the whole run gets captcha'd.
+     */
+    shipToCountry: string | null;
+    /** Ship-to used when a URL carries no regional signal and no override is set. Fixed to "US". */
+    defaultShipToCountry: string;
 
     /** 2captcha API key (input or `TWOCAPTCHA_API_KEY` env). `undefined` = no solver configured. */
     twoCaptchaApiKey?: string;
@@ -96,6 +133,13 @@ export function buildConfig(input: ScraperInput): ScraperConfig {
         requestHandlerTimeoutSecs: 360,
         headless: input.headless ?? true,
         proxyCountry: 'US',
+        residentialProxy: input.residentialProxy ?? false,
+        // The account's datacenter groups (SHADER / BUYPROXIES* / StaticUS3) are US-only; asking
+        // proxy.apify.com for any other country returns 407 "Selected proxy groups have no usable
+        // proxies from country '<XX>'", which surfaces in the browser as ERR_TUNNEL_CONNECTION_FAILED.
+        datacenterCountries: ['US'],
+        shipToCountry: input.shipToCountry?.trim().toUpperCase() || null,
+        defaultShipToCountry: 'US',
         twoCaptchaApiKey: input.twoCaptchaApiKey || process.env.TWOCAPTCHA_API_KEY || undefined,
         currency: 'USD',
         language: 'en_US',
@@ -107,4 +151,30 @@ export function buildConfig(input: ScraperInput): ScraperConfig {
         },
         retireBrowserAfterPageCount: 5,
     };
+}
+
+/**
+ * Decide the ship-to country for ONE start URL: an explicit input override wins, otherwise the
+ * region the pasted URL carries, otherwise the default.
+ *
+ * Call this on the RAW url — {@link normalizeAliExpressUrl} strips exactly the signals it reads.
+ */
+export function resolveShipToCountry(rawUrl: string, config: ScraperConfig): string {
+    return config.shipToCountry ?? detectShipToCountry(rawUrl) ?? config.defaultShipToCountry;
+}
+
+/**
+ * Which Apify proxy groups to request for a given exit country. `[]` means the automatic datacenter
+ * pool.
+ *
+ * Residential is not merely "better" outside the US — it is the only thing that works. The
+ * datacenter pool holds US addresses only, so `country-ES` there is refused at the CONNECT stage
+ * with 407 and the crawl dies before it ever reaches AliExpress. Datacenter therefore stays for the
+ * countries it can actually serve (where it's cheaper), and everything else goes residential.
+ */
+export function proxyGroupsFor(country: string, config: ScraperConfig): string[] {
+    if (config.residentialProxy) {
+        return ['RESIDENTIAL'];
+    }
+    return config.datacenterCountries.includes(country.toUpperCase()) ? [] : ['RESIDENTIAL'];
 }

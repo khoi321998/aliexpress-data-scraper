@@ -34,9 +34,51 @@ export const FINGERPRINT_OPTIONS: FingerprintGeneratorOptions = {
 //
 // The fingerprint injector spoofs the user-agent/navigator/locale but NOT the timezone, so
 // without this the page leaks the *host machine's* timezone (e.g. Asia/Bangkok) — a glaring
-// contradiction with an en-US identity on a US residential IP.
+// contradiction with the identity we present on a proxy IP.
+//
+// Locale stays en-US everywhere: we deliberately read AliExpress in English, and an
+// English-language browser is unremarkable in any market. The TIMEZONE is not so forgiving —
+// `America/New_York` reported from a Madrid IP is a contradiction no real machine produces, so it
+// has to follow the proxy's exit country.
 export const LOCALE = 'en-US';
 export const TIMEZONE_ID = 'America/New_York';
+
+/**
+ * Ship-to / proxy country → the timezone a real desktop there would report. Covers every country
+ * `detectShipToCountry` can produce; anything else (only reachable via the manual `shipToCountry`
+ * input) falls back to {@link TIMEZONE_ID}.
+ */
+const COUNTRY_TIMEZONES: Record<string, string> = {
+    US: 'America/New_York',
+    ES: 'Europe/Madrid',
+    FR: 'Europe/Paris',
+    DE: 'Europe/Berlin',
+    IT: 'Europe/Rome',
+    NL: 'Europe/Amsterdam',
+    PL: 'Europe/Warsaw',
+    PT: 'Europe/Lisbon',
+    GB: 'Europe/London',
+    BR: 'America/Sao_Paulo',
+    MX: 'America/Mexico_City',
+    CL: 'America/Santiago',
+    CA: 'America/Toronto',
+    RU: 'Europe/Moscow',
+    TR: 'Europe/Istanbul',
+    KR: 'Asia/Seoul',
+    JP: 'Asia/Tokyo',
+    VN: 'Asia/Ho_Chi_Minh',
+    TH: 'Asia/Bangkok',
+    ID: 'Asia/Jakarta',
+    IL: 'Asia/Jerusalem',
+    SA: 'Asia/Riyadh',
+    AE: 'Asia/Dubai',
+    AU: 'Australia/Sydney',
+};
+
+/** The timezone to present for a given proxy/ship-to country. */
+export function timezoneForCountry(country: string): string {
+    return COUNTRY_TIMEZONES[country.toUpperCase()] ?? TIMEZONE_ID;
+}
 
 /**
  * Chrome launch arguments that reduce obvious automation tells.
@@ -57,17 +99,20 @@ export const CHROME_LAUNCH_ARGS: string[] = [
 ];
 
 /**
- * Force the browser timezone + locale to the US region via the Chrome DevTools Protocol.
+ * Force the browser timezone + locale to match `country` via the Chrome DevTools Protocol.
  *
  * CDP overrides are native: `Date`/`Intl` report the overridden timezone exactly as a real
  * machine in that region would, with no JS patching to fingerprint. We use CDP (not Playwright
  * context options) because the fingerprint injector creates the context itself, so context-level
  * options passed through Crawlee hooks are ignored once `useFingerprints` is on.
+ *
+ * `country` should be the SAME country the request's proxy exits from (see the per-request proxy in
+ * `main.ts`), so IP geo, timezone and ship-to all tell one story.
  */
-export async function applyRegionOverrides(page: Page): Promise<void> {
+export async function applyRegionOverrides(page: Page, country = 'US'): Promise<void> {
     try {
         const client = await page.context().newCDPSession(page);
-        await client.send('Emulation.setTimezoneOverride', { timezoneId: TIMEZONE_ID });
+        await client.send('Emulation.setTimezoneOverride', { timezoneId: timezoneForCountry(country) });
         await client.send('Emulation.setLocaleOverride', { locale: LOCALE });
     } catch {
         // Best-effort: a failed override must never block the crawl.
