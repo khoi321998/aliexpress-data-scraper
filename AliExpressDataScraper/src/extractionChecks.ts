@@ -56,6 +56,27 @@ const hasSeller = (r: RecordLike) => r.seller != null;
 /** True when the store reports six-month review counts, so its review list must be non-empty. */
 const hasSellerReviews = (r: RecordLike) => (numAt(r, 'seller.reviewCounts.total') ?? 0) > 0;
 
+/**
+ * Fields ONLY `seller.page.info` can fill — no other endpoint carries them, so they are the signal
+ * for whether that endpoint answered at all. Deliberately excludes `positiveFeedbackPercent`,
+ * `followersText` and `scores`: `shop.benefit.info` fills those, so they would report a profile that
+ * never arrived.
+ */
+const PROFILE_ONLY_PATHS = ['seller.countryName', 'seller.openedSinceText', 'seller.storeLogo', 'seller.reviewCounts.total'];
+
+/**
+ * True when `seller.page.info` actually returned a profile.
+ *
+ * It answers `SUCCESS` with an empty `data: {}` for stores it holds nothing for — typically ones with
+ * no feedback (verified on seller 2671922206, whose PDP card reports `hasStore: false`). There is then
+ * no country, no opening date and no credibility to be had from ANY endpoint, so flagging them as
+ * missing reports a fact about the store as if it were property rot. Gate on this and those checks go
+ * quiet exactly when the endpoint had nothing, while still firing when it answered and a field
+ * genuinely vanished.
+ */
+const hasSellerProfile = (r: RecordLike) =>
+    PROFILE_ONLY_PATHS.some((path) => path.split('.').reduce<unknown>((acc, key) => (acc == null ? acc : (acc as RecordLike)[key]), r) != null);
+
 /** Records with a product: `product_only` and `product_and_seller`. */
 export const PRODUCT_CHECKS: FieldCheck[] = [
     // --- Core: a live PDP cannot have parsed correctly without these ----------------------------
@@ -78,7 +99,7 @@ export const PRODUCT_CHECKS: FieldCheck[] = [
     },
 
     // --- Detail: present on the overwhelming majority of live listings ---------------------------
-    { path: 'product.pricing.currency', severity: 'warning', source: 'pdp.pc.query → PRICE.targetSkuPriceInfo.originalPrice.currency' },
+    { path: 'product.pricing.currency', severity: 'warning', source: 'pdp.pc.query → PRICE.{targetSkuPriceInfo,skuPriceInfoMap[*],itemRangePriceView}.<amount>.currency | GLOBAL_DATA.globalData.currencyCode' },
     { path: 'product.specifications', severity: 'warning', source: 'pdp.pc.query → PRODUCT_PROP_PC.showedProps[].attrName/.attrValue' },
     { path: 'product.stock.availableQuantity', severity: 'warning', source: 'pdp.pc.query → QUANTITY_PC.totalAvailableInventory' },
     {
@@ -112,15 +133,30 @@ export const PRODUCT_CHECKS: FieldCheck[] = [
 
     // --- Seller enrichment: only counted when a profile actually came back ------------------------
     { path: 'seller.name', severity: 'warning', source: 'seller.page.info → data.sellerBaseInfo.storeName', when: hasSeller },
-    { path: 'seller.countryName', severity: 'warning', source: 'seller.page.info → data.sellerBaseInfo.countryName', when: hasSeller },
-    { path: 'seller.openedSinceText', severity: 'warning', source: 'seller.page.info → data.sellerBaseInfo.since', when: hasSeller },
+    {
+        path: 'seller.countryName',
+        severity: 'warning',
+        source: 'seller.page.info → data.sellerBaseInfo.countryName',
+        when: (r) => hasSeller(r) && hasSellerProfile(r),
+    },
+    {
+        path: 'seller.openedSinceText',
+        severity: 'warning',
+        source: 'seller.page.info → data.sellerBaseInfo.since',
+        when: (r) => hasSeller(r) && hasSellerProfile(r),
+    },
     {
         path: 'seller.positiveFeedbackPercent',
         severity: 'warning',
-        source: 'seller.page.info → data.buyerEvaluationInfo.positiveFeedBackValue',
-        when: hasSeller,
+        source: 'seller.page.info → data.buyerEvaluationInfo.positiveFeedBackValue | shop.benefit.info → benefitInfoList[FeedBack].value',
+        when: (r) => hasSeller(r) && hasSellerProfile(r),
     },
-    { path: 'seller.scores', severity: 'warning', source: 'seller.page.info → data.operatingScoreInfoList[].title/.value', when: hasSeller },
+    {
+        path: 'seller.scores',
+        severity: 'warning',
+        source: 'seller.page.info → data.operatingScoreInfoList[].title/.value | shop.benefit.info → benefitInfoList[storerating.*]',
+        when: (r) => hasSeller(r) && hasSellerProfile(r),
+    },
     {
         path: 'seller.productPreviews',
         severity: 'warning',
@@ -152,15 +188,27 @@ export const SELLER_ONLY_CHECKS: FieldCheck[] = [
     },
     { path: 'seller.platformSellerId', severity: 'critical', source: 'renderPageData.htm → result.pageData.globalData.sellerId | .bizId' },
 
-    { path: 'seller.countryName', severity: 'warning', source: 'seller.page.info → data.sellerBaseInfo.countryName' },
-    { path: 'seller.openedSinceText', severity: 'warning', source: 'seller.page.info → data.sellerBaseInfo.since' },
-    { path: 'seller.positiveFeedbackPercent', severity: 'warning', source: 'seller.page.info → data.buyerEvaluationInfo.positiveFeedBackValue' },
-    { path: 'seller.scores', severity: 'warning', source: 'seller.page.info → data.operatingScoreInfoList[].title/.value' },
+    { path: 'seller.countryName', severity: 'warning', source: 'seller.page.info → data.sellerBaseInfo.countryName', when: hasSellerProfile },
+    { path: 'seller.openedSinceText', severity: 'warning', source: 'seller.page.info → data.sellerBaseInfo.since', when: hasSellerProfile },
+    {
+        path: 'seller.positiveFeedbackPercent',
+        severity: 'warning',
+        source: 'seller.page.info → data.buyerEvaluationInfo.positiveFeedBackValue | shop.benefit.info → benefitInfoList[FeedBack].value',
+        when: hasSellerProfile,
+    },
+    {
+        path: 'seller.scores',
+        severity: 'warning',
+        source: 'seller.page.info → data.operatingScoreInfoList[].title/.value | shop.benefit.info → benefitInfoList[storerating.*]',
+        when: hasSellerProfile,
+    },
     { path: 'seller.sellerReviews', severity: 'warning', source: 'evaluation.productEvaluation → data.evaViewList[]', when: hasSellerReviews },
 ];
 
 /*
 Deliberately UNWATCHED — each would fire on healthy records:
+  - seller.soldByStoreText     — `shop.benefit.info` omits the 180-day order counter for stores under
+  - seller.regularBuyersText     its display threshold, so a quiet-but-healthy store has neither.
   - product.brand              — no code path ever fills it; it is `null` on every record today.
   - product.paymentMethods     — a hardcoded constant list in `response.ts`, not scraped.
   - product.pricing.priceMax   — same `skuPriceInfoMap` values as priceMin; would double-report.

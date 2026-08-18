@@ -19,6 +19,7 @@ import { createHash } from 'node:crypto';
 import type { Log } from 'apify';
 import type { Page } from 'playwright';
 
+
 /** MTOP H5 gateway for the seller endpoints (the `.com` gateway, unlike the PDP's `.us`). */
 const ACS_BASE = 'https://acs.aliexpress.com/h5';
 /** The store page-data JSONP endpoint that carries `globalData.sellerId`. */
@@ -26,6 +27,8 @@ const RENDER_PAGE_DATA_RE = /renderPageData\.htm/i;
 /** Per-API H5 appKey for `mtop.ae.shop.seller.page.info`. */
 const SHOP_INFO_APP_KEY = '24770048';
 const SHOP_INFO_API = 'mtop.ae.shop.seller.page.info';
+/** Store "benefits" — the credibility strip AliExpress renders for stores `seller.page.info` has nothing for. */
+const SHOP_BENEFIT_API = 'mtop.ae.shop.benefit.info';
 
 /** One credibility score row, e.g. { title: "store rating", value: 4.9 }. */
 export interface SellerScore {
@@ -41,6 +44,10 @@ export interface SellerInfo {
     openedSinceText: string | null;
     /** Followers text as shown, e.g. "503.6K followers". */
     followersText: string | null;
+    /** Orders in the last 180 days, as shown — e.g. "40,000+". The "+" is a bucket, not a rounding. */
+    soldByStoreText: string | null;
+    /** Repeat customers, as shown — e.g. "2,000+". Same bucketed form. */
+    regularBuyersText: string | null;
     storeLogo: string | null;
     positiveFeedbackPercent: number | null;
     positiveCount: number | null;
@@ -316,6 +323,9 @@ export function parseSellerInfo(data: Record<string, unknown>): SellerInfo {
         countryName: toStr(base.countryName),
         openedSinceText: toStr(base.since),
         followersText: toStr(base.follows),
+        // Volume counters live on `shop.benefit.info`, not here.
+        soldByStoreText: null,
+        regularBuyersText: null,
         storeLogo: toHttps(base.storeLogo),
         positiveFeedbackPercent: num(evalInfo.positiveFeedBackValue),
         positiveCount: num(evalInfo.totalPositiveSixMonths),
@@ -350,5 +360,105 @@ export async function fetchSellerInfo(
     }
     const info = parseSellerInfo(data);
     log.info('seller info fetched (API)', { storeName: info.storeName, positiveFeedbackPercent: info.positiveFeedbackPercent, scores: info.scores.length });
+    return info;
+}
+
+// --- shop.benefit.info (credibility for stores seller.page.info won't serve) ---------------------
+
+/** Build the `data` payload for `mtop.ae.shop.benefit.info`. */
+function buildBenefitData(sellerId: string, storeId: string, country: string, language: string): string {
+    return JSON.stringify({
+        sellerId: Number(sellerId),
+        storeId: Number(storeId),
+        _country: country,
+        _lang: language.split('_')[0] || 'en',
+        needReset: true,
+    });
+}
+
+/**
+ * Render one `highlightInfos[]` entry into display text: `{ highlightData: '70.2K',
+ * highlightMessage: ' # followers' }` → `'70.2K followers'`, matching how `seller.page.info` formats
+ * the same field (`follows: '503.6K followers'`).
+ */
+function renderHighlight(raw: unknown): string | null {
+    const h = asRecord(raw);
+    const data = toStr(h.highlightData);
+    const message = toStr(h.highlightMessage);
+    if (!data || !message) {
+        return null;
+    }
+    return (message.includes('#') ? message.replace('#', data) : `${data} ${message}`).replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Fetch the store's benefit strip — the credibility block the store page renders next to the name.
+ *
+ * Called on EVERY seller, alongside `seller.page.info`, because that is what the store page does:
+ * both endpoints are always asked, and whether a store has feedback decides which of them comes back
+ * with data. `seller.page.info` answers `SUCCESS` with an empty `data` for stores it has nothing for
+ * (verified on seller 2671922206), and this one still returns their followers and rating strip.
+ *
+ * Deliberately partial: it carries followers, the positive-review rate and whichever store ratings
+ * apply, and knows nothing about store name, country or opening date — those stay null.
+ * `sellerLocal` is a country CODE (`'CN'`), not the display name `countryName` holds, so it is unused.
+ *
+ * Returns `null` when the call is blocked or carries no benefit list.
+ */
+export async function fetchSellerBenefit(
+    page: Page,
+    sellerId: string,
+    storeId: string,
+    log: Log,
+    opts: { language: string; country: string },
+): Promise<SellerInfo | null> {
+    const json = await callSellerMtop(page, SHOP_BENEFIT_API, SHOP_INFO_APP_KEY, buildBenefitData(sellerId, storeId, opts.country, opts.language), log);
+    const data = asRecord(asRecord(json).data);
+    const benefits = (Array.isArray(data.benefitInfoList) ? data.benefitInfoList : []).map(asRecord);
+    const highlights = (Array.isArray(data.highlightInfos) ? data.highlightInfos : []).map(asRecord);
+    if (benefits.length === 0 && highlights.length === 0) {
+        const { ret } = asRecord(json) as { ret?: unknown[] };
+        log.warning('shop.benefit.info — no data (block/empty).', { ret: Array.isArray(ret) ? ret[0] : null });
+        return null;
+    }
+
+    const positiveEntry = benefits.find((b) => b.mcmsKey === 'module.mobile.storerating.FeedBack');
+    const soldEntry = benefits.find((b) => b.mcmsKey === 'module.mobile.storerating.90DayOrders');
+    const buyersEntry = benefits.find((b) => b.mcmsKey === 'module.mobile.storerating.RegularBuyers');
+    const followersEntry = highlights.find((h) => h.mcmsKey === 'shop.shopInfo.baisc.followersText');
+
+    // The same `module.mobile.storerating.*` list mixes real ratings ("store rating": "4.9") with
+    // volume counters ("sold by store": "40,000+", "regular buyers": "2,000+") and the percentage
+    // handled above. Test the RAW string, not `num()`: that helper strips separators and suffixes, so
+    // "40,000+" would sail through as the score 40000. A rating is a bare 1-2 digit decimal.
+    const isRating = (value: string | null): boolean => value != null && /^\d{1,2}(?:\.\d+)?$/.test(value.trim());
+    const scores = benefits
+        .filter((b) => b !== positiveEntry && isRating(toStr(b.value)))
+        .map((b) => ({ title: toStr(b.title) ?? '', value: num(toStr(b.value)) }))
+        .filter((score): score is { title: string; value: number } => score.title !== '' && score.value != null);
+
+    const info: SellerInfo = {
+        storeName: null,
+        countryName: null,
+        openedSinceText: null,
+        followersText: followersEntry ? renderHighlight(followersEntry) : null,
+        // Kept verbatim: "2,000+" means at least 2000, which a number cannot express.
+        soldByStoreText: toStr(soldEntry?.value),
+        regularBuyersText: toStr(buyersEntry?.value),
+        storeLogo: null,
+        positiveFeedbackPercent: num(toStr(positiveEntry?.value)?.replace('%', '') ?? null),
+        positiveCount: null,
+        neutralCount: null,
+        negativeCount: null,
+        totalCount: null,
+        scores,
+    };
+    log.info('seller benefits fetched (API)', {
+        positiveFeedbackPercent: info.positiveFeedbackPercent,
+        followersText: info.followersText,
+        soldByStoreText: info.soldByStoreText,
+        regularBuyersText: info.regularBuyersText,
+        scores: info.scores.length,
+    });
     return info;
 }

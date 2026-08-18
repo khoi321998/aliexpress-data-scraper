@@ -1,44 +1,10 @@
-// Price-string parsing helpers — turn a localized, currency-prefixed price string
-// (e.g. `₫1,209,822`, `$12.99`, `€12,99`) into an ISO currency code + numeric amount.
+// Price-string parsing helper — turns a localized, currency-prefixed price string
+// (e.g. `₫1,209,822`, `$12.99`, `€12,99`) into a numeric amount.
 //
 // Consumed by `productApi.ts`, which reads prices out of the `pdp.pc.query` JSON
-// (`salePriceString` / `originalPrice`) rather than the page DOM.
-
-// Map the leading currency symbol AliExpress renders to its ISO 4217 code. Falls back to the
-// raw symbol when unknown so the information is never lost.
-const CURRENCY_SYMBOLS: Record<string, string> = {
-    '₫': 'VND',
-    $: 'USD',
-    '€': 'EUR',
-    '£': 'GBP',
-    '¥': 'JPY',
-    '₽': 'RUB',
-    '₹': 'INR',
-    '₩': 'KRW',
-    '₺': 'TRY',
-    '₴': 'UAH',
-    R$: 'BRL',
-};
-
-/**
- * Pull the ISO currency code out of a localized price string.
- *
- * Matches the non-numeric prefix (`₫`, `R$`, `US $`, …) against {@link CURRENCY_SYMBOLS},
- * trying the longest symbols first; returns the raw symbol if it is not in the map, or `null`
- * when the string carries no symbol at all.
- */
-export function parseCurrency(text: string): string | null {
-    const symbol = text.replace(/[\d.,\s]/g, '').trim();
-    if (!symbol) {
-        return null;
-    }
-    for (const known of Object.keys(CURRENCY_SYMBOLS).sort((a, b) => b.length - a.length)) {
-        if (symbol.includes(known)) {
-            return CURRENCY_SYMBOLS[known];
-        }
-    }
-    return symbol;
-}
+// (`salePriceString`) rather than the page DOM. The ISO currency code is NOT derived here: it is
+// read straight off the amount objects the API returns (see `parseCurrencyCode`), because guessing
+// it from the symbol is lossy — `$` is as much CAD/AUD/MXN as it is USD.
 
 /**
  * Parse a localized price string into a number, handling both `,`-decimal (EU) and `.`-decimal

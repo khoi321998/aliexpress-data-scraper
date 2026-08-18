@@ -17,7 +17,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import type { Log } from 'apify';
 import type { Page } from 'playwright';
 
-import { parseCurrency, parsePrice } from './pricing.js';
+import { parsePrice } from './pricing.js';
 import { parseProductReviews } from './reviewsApi.js';
 import type { Description, Media, Pricing, ReviewSample, ReviewsSummary, SellerRef, Shipping, Specification, Stock } from './types.js';
 import { storefrontHost } from './url.js';
@@ -350,6 +350,63 @@ function parseTitle(result: Record<string, unknown>): string | null {
 }
 
 /**
+ * Amount-like sub-objects (`{ currency: 'EUR', value: 21.09, formatedAmount: '€21,09' }`) that carry
+ * an ISO code. The first four hang off a per-SKU price info, the last four off `itemRangePriceView`.
+ */
+const AMOUNT_KEYS = [
+    'originalPrice',
+    'salePrice',
+    'skuAmount',
+    'skuActivityAmount',
+    'minDisPrice',
+    'maxDisPrice',
+    'minOriginalPrice',
+    'maxOriginalPrice',
+] as const;
+
+/** Read the ISO code off one amount-like object; `null` when absent or not a non-empty string. */
+function amountCurrency(value: unknown): string | null {
+    const code = asRecord(value).currency;
+    return typeof code === 'string' && code.trim() !== '' ? code.trim() : null;
+}
+
+/**
+ * Currency — resolved in a strict priority order over the price infos the PRICE module carries.
+ *
+ * `infos[0]` is ALWAYS the selected SKU (`targetSkuPriceInfo`), so the ladder is:
+ *   1. selected SKU → ISO code off an amount object   (what the original code used — unchanged)
+ *   2. each variant in `skuPriceInfoMap` → ISO code
+ *   3. `itemRangePriceView` → ISO code off its min/max amounts
+ *   4. `GLOBAL_DATA.globalData.currencyCode` — the currency the whole page is priced in
+ *
+ * Rung 4 exists because a PRICE module can carry NO amount object whatsoever: a multi-variant US
+ * listing (item 3256811581312282) ships `targetSkuPriceInfo` and six `skuPriceInfoMap` entries that
+ * each hold only `salePriceString: '$7.74'` — no `originalPrice`, no `itemRangePriceView`. The ISO
+ * code for that page lives one module over, in GLOBAL_DATA.
+ *
+ * Rung 1 keeps every listing that already worked resolving from exactly the same field as before.
+ * Rungs 2–3 only ever run when rung 1 yields nothing — the case that produced an empty currency:
+ * a single-variant ES listing arrives with NO `targetSkuPriceInfo` at all (verified against the raw
+ * payload of item 1005012553882069), so prices came from `skuPriceInfoMap` while the currency lookup
+ * had nowhere to read from.
+ *
+ * Every rung is an ISO code the API states outright — we deliberately do NOT guess one from the
+ * currency symbol in a formatted price. That guess is lossy (`$` is as much CAD/AUD/MXN as USD) and
+ * a silently wrong code is worse than an empty one: an empty currency is flagged by the extraction
+ * audit and logged with the raw module, a wrong one just looks like data.
+ */
+function parseCurrencyCode(infos: Record<string, unknown>[], globalData: Record<string, unknown>): string {
+    for (const info of infos) {
+        for (const key of AMOUNT_KEYS) {
+            const code = amountCurrency(info[key]);
+            if (code) return code;
+        }
+    }
+    const pageCode = globalData.currencyCode;
+    return typeof pageCode === 'string' && pageCode.trim() !== '' ? pageCode.trim() : '';
+}
+
+/**
  * Pricing — currency from the selected SKU, min/max sale price across all SKU variants.
  * `skuPriceInfoMap` holds one entry per variant ({ salePriceString: "$32.49", originalPrice: {...} });
  * a single-SKU product has one entry, so min === max. Falls back to the selected SKU's price.
@@ -358,13 +415,14 @@ function parsePricing(result: Record<string, unknown>): Pricing {
     const price = asRecord(result.PRICE);
     const target = asRecord(price.targetSkuPriceInfo);
     const skuMap = asRecord(price.skuPriceInfoMap);
+    const skuInfos = Object.values(skuMap).map(asRecord);
+    const rangeView = asRecord(price.itemRangePriceView);
 
     const targetSale = typeof target.salePriceString === 'string' ? target.salePriceString : '';
-    const { currency } = asRecord(target.originalPrice);
 
-    const values = Object.values(skuMap)
+    const values = skuInfos
         .map((info) => {
-            const s = asRecord(info).salePriceString;
+            const s = info.salePriceString;
             return typeof s === 'string' ? parsePrice(s) : null;
         })
         .filter((n): n is number => n !== null);
@@ -374,7 +432,7 @@ function parsePricing(result: Record<string, unknown>): Pricing {
     }
 
     return {
-        currency: (typeof currency === 'string' && currency) || parseCurrency(targetSale) || '',
+        currency: parseCurrencyCode([target, ...skuInfos, rangeView], asRecord(asRecord(result.GLOBAL_DATA).globalData)),
         priceMin: values.length ? Math.min(...values) : null,
         priceMax: values.length ? Math.max(...values) : null,
     };

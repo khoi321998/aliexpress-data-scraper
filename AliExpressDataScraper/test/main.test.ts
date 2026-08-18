@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { buildConfig, proxyGroupsFor, resolveShipToCountry } from '../src/config.js';
 import { classifyPage, isPunishUrl } from '../src/detection.js';
 import { parsePdpResult } from '../src/productApi.js';
+import { sellerApiOpts } from '../src/sellerProfile.js';
 import { TIMEZONE_ID, timezoneForCountry } from '../src/stealth.js';
 import { detectShipToCountry, extractAliExpressItemId, normalizeAliExpressUrl } from '../src/url.js';
 
@@ -167,6 +168,71 @@ describe('pdp.pc.query parsing', () => {
         expect(p.descUrl).toBe('https://pdp.aliexpress-media.com/desc.htm?x=1');
     });
 
+    // --- currency priority ladder (see parseCurrencyCode) ---------------------------------------
+    // Rung 1 must stay ahead of everything: listings that already resolved from the selected SKU
+    // keep resolving from it, even when a variant disagrees.
+    it('prefers the selected SKU currency over any variant', () => {
+        const p = parsePdpResult({
+            PRICE: {
+                targetSkuPriceInfo: { originalPrice: { currency: 'USD' }, salePriceString: '$29.12' },
+                skuPriceInfoMap: { a: { originalPrice: { currency: 'EUR' }, salePriceString: '€29,12' } },
+            },
+        });
+        expect(p.pricing.currency).toBe('USD');
+    });
+
+    // The API's stated code wins over anything inferable from the '$' in the formatted price, which
+    // would have guessed USD while the payload says CAD outright.
+    it('takes the stated ISO code, never a guess from the price symbol', () => {
+        const p = parsePdpResult({
+            PRICE: {
+                targetSkuPriceInfo: { salePriceString: '$29.12' },
+                skuPriceInfoMap: { a: { originalPrice: { currency: 'CAD' }, salePriceString: '$29.12' } },
+            },
+        });
+        expect(p.pricing.currency).toBe('CAD');
+    });
+
+    // Rung 3 - the last API-stated source, used when no per-SKU amount object carries a code.
+    it('reads the currency from itemRangePriceView as a last resort', () => {
+        const p = parsePdpResult({
+            PRICE: {
+                itemRangePriceView: { minDisPrice: { currency: 'GBP', value: 29.12 } },
+                skuPriceInfoMap: { a: { salePriceString: '£29.12' } },
+            },
+        });
+        expect(p.pricing).toEqual({ currency: 'GBP', priceMin: 29.12, priceMax: 29.12 });
+    });
+
+    // Rung 4 - item 3256811581312282: six variants, every price info symbol-only (no `originalPrice`,
+    // no `itemRangePriceView`), so the page-level code in GLOBAL_DATA is the only ISO source left.
+    it('falls back to GLOBAL_DATA.currencyCode when no price info carries an amount object', () => {
+        const p = parsePdpResult({
+            GLOBAL_DATA: { globalData: { currencyCode: 'USD', localStr: 'en_US' } },
+            PRICE: {
+                targetSkuPriceInfo: { salePriceString: '$6.71' },
+                skuPriceInfoMap: { a: { salePriceString: '$7.74' }, b: { salePriceString: '$6.71' } },
+            },
+        });
+        expect(p.pricing).toEqual({ currency: 'USD', priceMin: 6.71, priceMax: 7.74 });
+    });
+
+    // No rung yields a code: report it EMPTY rather than guessing 'EUR' from the symbol. An empty
+    // currency is flagged by the extraction audit; a wrong one would pass silently.
+    it('leaves the currency empty when the API states none, instead of guessing from the symbol', () => {
+        const p = parsePdpResult({ PRICE: { skuPriceInfoMap: { a: { salePriceString: '€21,09' } } } });
+        expect(p.pricing).toEqual({ currency: '', priceMin: 21.09, priceMax: 21.09 });
+    });
+
+    // The es.aliexpress.com single-SKU shape that shipped `currency: ''` while the prices parsed:
+    // no `targetSkuPriceInfo` at all, so the code must reach into `skuPriceInfoMap` for the ISO code.
+    it('reads the currency from skuPriceInfoMap when targetSkuPriceInfo is absent', () => {
+        const p = parsePdpResult({
+            PRICE: { skuPriceInfoMap: { a: { salePriceString: '€21,09', originalPrice: { currency: 'EUR' } } } },
+        });
+        expect(p.pricing).toEqual({ currency: 'EUR', priceMin: 21.09, priceMax: 21.09 });
+    });
+
     it('degrades gracefully on an empty result', () => {
         const p = parsePdpResult({});
         expect(p.title).toBeNull();
@@ -224,5 +290,29 @@ describe('detection', () => {
     it('classifies a blank/shell product page as empty', async () => {
         const page = fakePage({ url: 'https://www.aliexpress.com/item/123.html', bodyLen: 10 });
         expect(await classifyPage(page)).toBe('empty');
+    });
+});
+
+describe('seller MTOP payload region', () => {
+    // The store catalog module (`ModuleAsyncService` → `productList`) filters by ship-to and answers
+    // SUCCESS with an empty body when the asking region cannot be shipped to. Signing the fixed
+    // proxyCountry ("US") emptied `seller.productPreviews` for locale-only stores reached from a
+    // locale storefront — e.g. a Spanish store read from `es.aliexpress.com`.
+    it('signs the request ship-to, not the fixed proxy country', () => {
+        const config = buildConfig({});
+        expect(sellerApiOpts(config, 'ES').country).toBe('ES');
+        expect(sellerApiOpts(config, 'VN').country).toBe('VN');
+    });
+
+    it('falls back to the proxy country for callers with no per-request region', () => {
+        const config = buildConfig({});
+        expect(sellerApiOpts(config, undefined).country).toBe(config.proxyCountry);
+    });
+
+    it('leaves language and currency pinned regardless of region', () => {
+        const config = buildConfig({});
+        const opts = sellerApiOpts(config, 'ES');
+        expect(opts.language).toBe(config.language);
+        expect(opts.currency).toBe(config.currency);
     });
 });

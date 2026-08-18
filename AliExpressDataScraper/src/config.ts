@@ -59,11 +59,13 @@ export interface ScraperConfig {
     requestHandlerTimeoutSecs: number;
     headless: boolean;
     /**
-     * Proxy country for the pipelines that do NOT resolve one per request (the `seller_only`
-     * pipeline, and the seller MTOP payloads). Fixed to "US".
+     * Proxy country for the `seller_only` pipeline, which starts from a store URL and so has no
+     * per-request ship-to to resolve. Fixed to "US". Also the fallback region for seller MTOP
+     * payloads when no ship-to is supplied — see `sellerApiOpts` in `sellerProfile.ts`.
      *
      * The product crawler does NOT use this: it exits the proxy in the SAME country it ships to,
-     * resolved per request — see {@link shipToCountry}.
+     * resolved per request — see {@link shipToCountry} — and the seller scrape it triggers now signs
+     * that same country, so a locale-only store's catalog is visible to it.
      */
     proxyCountry: string;
     /** Force RESIDENTIAL everywhere, even for countries the datacenter pool can serve. */

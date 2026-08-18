@@ -63,6 +63,10 @@ function storeIdFromRef(url: string | null, platformSellerId: string | null): st
  * and the strategy allows it, fall back to a dedicated local (no-proxy) browser that solves the
  * captcha. `inline-only` NEVER takes that slow fallback — it returns null instead, keeping latency
  * low. Caches the PROMISE (not the result) keyed by store id.
+ *
+ * `shipToCountry` is the region this product was read under; the seller's catalog module is filtered
+ * by ship-to, so the seller call has to ask from the same market (see `sellerApiOpts`). It is part of
+ * the cache key for the same reason — the same store yields a different catalog per region.
  */
 function kickoffSellerScrape(
     page: Page,
@@ -71,6 +75,7 @@ function kickoffSellerScrape(
     log: Log,
     sellerCache: Map<string, Promise<Seller | null>>,
     sellerStrategy: SellerStrategy,
+    shipToCountry: string,
 ): Promise<Seller | null> | null {
     if (!response.sellerRef || config.mode !== 'product_and_seller') {
         return null;
@@ -83,17 +88,24 @@ function kickoffSellerScrape(
     if (!storeId) {
         return null;
     }
-    const cached = sellerCache.get(storeId);
+    // Region-scoped key: the catalog module answers per ship-to, so an ES lookup must not be handed
+    // back to a US request in a run that mixes storefronts.
+    const cacheKey = `${storeId}@${shipToCountry}`;
+    const cached = sellerCache.get(cacheKey);
     if (cached) {
         return cached;
     }
     // The PDP's `adminSeq` (sellerRef.platformSellerId) IS the real sellerId the seller APIs need.
     const knownSellerId = response.sellerRef.platformSellerId;
+    // `SHOP_CARD_PC.storeName` — kept for `buildSellerDto`'s name fallback, since this flow never
+    // fetches renderPageData (the PDP already gave us the sellerId) and so has no other name source
+    // when `seller.page.info` answers empty. Read out here: the narrowing is lost inside the closure.
+    const knownStoreName = response.sellerRef.name;
     log.info(`🚀 Triggering seller scrape for store ${storeId} now (runs while we finish the product)…`);
     const sellerPromise = (async (): Promise<Seller | null> => {
         // Fast path: inline on the product page when we already have the sellerId.
         if (knownSellerId) {
-            const inline = await scrapeSellerInline(page, storeId, knownSellerId, log, config).catch((error) => {
+            const inline = await scrapeSellerInline(page, storeId, knownSellerId, log, config, shipToCountry, knownStoreName).catch((error) => {
                 log.warning('Inline seller fetch threw — treating as blocked.', {
                     error: error instanceof Error ? error.message : String(error),
                 });
@@ -110,7 +122,7 @@ function kickoffSellerScrape(
             log.info('Inline seller fetch blocked/empty — falling back to a local (no-proxy) browser.');
         }
         // Fallback (batch only): dedicated local browser (resolves sellerId via renderPageData + solves captcha).
-        const local = await scrapeSellerLocal(storeId, log, config, knownSellerId).catch((error) => {
+        const local = await scrapeSellerLocal(storeId, log, config, knownSellerId, shipToCountry, knownStoreName).catch((error) => {
             log.warning('Seller scrape failed — skipping seller (product unaffected).', {
                 error: error instanceof Error ? error.message : String(error),
             });
@@ -118,7 +130,7 @@ function kickoffSellerScrape(
         });
         return local ? local.seller : null;
     })();
-    sellerCache.set(storeId, sellerPromise);
+    sellerCache.set(cacheKey, sellerPromise);
     return sellerPromise;
 }
 
@@ -156,6 +168,12 @@ export async function extractProduct(
         return { response, blocked: true, blockReason: 'empty-product' };
     }
 
+    if (!parsed.pricing.currency) {
+        // Every rung of the currency ladder came up empty — AliExpress has moved the ISO code again.
+        // Worth a line: the extraction audit flags the field, but only this says which listing.
+        log.warning('pricing currency empty — no ISO code in PRICE or GLOBAL_DATA.', { url: page.url() });
+    }
+
     response.product.title = parsed.title;
     response.product.pricing = parsed.pricing;
     response.product.media = parsed.media;
@@ -175,7 +193,7 @@ export async function extractProduct(
     });
 
     // Seller scrape runs concurrently (uses sellerRef from the JSON). product_only skips it.
-    const sellerPromise = kickoffSellerScrape(page, response, config, log, sellerCache, opts.sellerStrategy);
+    const sellerPromise = kickoffSellerScrape(page, response, config, log, sellerCache, opts.sellerStrategy, shipToCountry);
 
     // Description — fetched from the URL embedded in the JSON, then cleaned.
     response.product.description = await fetchDescription(page, parsed.descUrl, log);
@@ -191,9 +209,23 @@ export async function extractProduct(
         response.product.reviewsSummary = apiReviews;
     }
     // Reviews API can be empty on some products; fall back to the rating from PC_RATING.
-    if (response.product.reviewsSummary.rating == null && parsed.ratingFallback.rating != null) {
-        response.product.reviewsSummary.rating = parsed.ratingFallback.rating;
-        response.product.reviewsSummary.reviewCount = parsed.ratingFallback.reviewCount;
+    //
+    // It does NOT signal "empty" by omitting the statistic — it answers with an explicit zeroed one
+    // (`evarageStar: 0, totalNum: 0`), which parses to 0, not null. Guarding on `rating == null`
+    // alone therefore never fired, and a zeroed API response silently won over a PC_RATING that knew
+    // better. That also disarmed the extraction audit, whose review checks are gated on
+    // `reviewCount > 0` (see `hasReviews`): the zeros closed the gate on themselves.
+    const summary = response.product.reviewsSummary;
+    const apiEmpty = (summary.reviewCount ?? 0) === 0 && (summary.rating ?? 0) === 0;
+    const fallbackHasData = (parsed.ratingFallback.reviewCount ?? 0) > 0 || (parsed.ratingFallback.rating ?? 0) > 0;
+    if (apiEmpty && fallbackHasData) {
+        log.warning('reviews API returned an empty statistic — falling back to PC_RATING.', {
+            url: page.url(),
+            fallbackRating: parsed.ratingFallback.rating,
+            fallbackReviewCount: parsed.ratingFallback.reviewCount,
+        });
+        summary.rating = parsed.ratingFallback.rating;
+        summary.reviewCount = parsed.ratingFallback.reviewCount;
     }
     log.info('reviews extracted', {
         rating: response.product.reviewsSummary.rating,

@@ -21,7 +21,7 @@ import { chromium } from 'playwright';
 import type { ScraperConfig } from './config.js';
 import { logEgressIp } from './ip.js';
 import type { SellerInfo } from './sellerApi.js';
-import { armSellerIdInterceptor, fetchSellerInfo, resolveSellerId } from './sellerApi.js';
+import { armSellerIdInterceptor, fetchSellerBenefit, fetchSellerInfo, resolveSellerId } from './sellerApi.js';
 import { detectBlock, trySolveCaptcha } from './sellerCaptcha.js';
 import { fetchSellerProducts } from './sellerProductsApi.js';
 import { fetchSellerReviews } from './sellerReviewsApi.js';
@@ -29,14 +29,58 @@ import type { Seller, SellerProductPreview, SellerReviewSample } from './types.j
 import { storeAllItemsUrl } from './url.js';
 
 /**
+ * The `{ language, currency, country }` triple every seller MTOP payload is signed with.
+ *
+ * `country` is the SHIP-TO region, not the proxy exit — and it is not cosmetic. `seller.page.info`
+ * and `evaluation.productEvaluation` ignore it, but the catalog module
+ * (`ModuleAsyncService` → `productList`) filters the store's items by what it can ship to the
+ * asking region, and answers `SUCCESS` with an empty `data: {}` when nothing matches. A locale
+ * store — e.g. `The Box of Toys Store` (Spain), reached from `es.aliexpress.com` — returns its 12
+ * items for `ES`/`IT`/`PT` and NOTHING for `US`/`DE`/`FR`. Signing the fixed `config.proxyCountry`
+ * ("US") therefore produced an empty `seller.productPreviews` on exactly the stores the run had
+ * just successfully read a PDP from under `ES`, which the extraction audit reported as a degraded
+ * record. Passing the request's own ship-to keeps the seller call in the same market as the product
+ * call that found the seller.
+ *
+ * Falls back to `config.proxyCountry` for callers with no per-request region (the `seller_only`
+ * pipeline starts from a store URL, which carries no ship-to signal).
+ */
+export function sellerApiOpts(config: ScraperConfig, shipToCountry?: string): { language: string; currency: string; country: string } {
+    return { language: config.language, currency: config.currency, country: shipToCountry ?? config.proxyCountry };
+}
+
+/**
  * Map the API-fetched pieces into the shared {@link Seller} DTO (extra fields ride the index signature).
  *
- * `fallbackStoreName` is the name lifted from renderPageData. `seller.page.info` stays the primary
+ * `fallbackStoreName` is the name lifted from renderPageData — or, for the product flow, straight
+ * off the PDP's `SHOP_CARD_PC.storeName` (`sellerRef.name`), which skips renderPageData entirely
+ * because the PDP already handed it the sellerId. `seller.page.info` stays the primary
  * source (it also carries country / logo / followers / credibility), but it answers `SUCCESS` with an
  * empty `data` for some stores — fully-managed ONE_STOP_SERVICE ones in particular — and then `info`
  * is null. renderPageData is fetched anyway to resolve the sellerId, so using its name costs nothing
  * and keeps `name` populated where the profile endpoint has nothing to say.
  */
+/**
+ * Overlay the benefit strip onto the profile: `seller.page.info` wins every field it has, and
+ * `shop.benefit.info` fills what is left.
+ *
+ * Both endpoints are always called (that is what the store page itself does), and they answer
+ * independently: a store with no feedback gets an empty `data` from the profile endpoint while the
+ * benefit endpoint still returns its follower count and rating strip, and vice versa.
+ */
+function withBenefits(info: SellerInfo | null, benefit: SellerInfo | null): SellerInfo | null {
+    if (!benefit) return info;
+    if (!info) return benefit;
+    return {
+        ...info,
+        followersText: info.followersText ?? benefit.followersText,
+        soldByStoreText: info.soldByStoreText ?? benefit.soldByStoreText,
+        regularBuyersText: info.regularBuyersText ?? benefit.regularBuyersText,
+        positiveFeedbackPercent: info.positiveFeedbackPercent ?? benefit.positiveFeedbackPercent,
+        scores: info.scores.length ? info.scores : benefit.scores,
+    };
+}
+
 export function buildSellerDto(
     pathId: string,
     sellerId: string | null,
@@ -51,6 +95,8 @@ export function buildSellerDto(
         url: `https://www.aliexpress.com/store/${pathId}`,
         countryName: info?.countryName ?? null,
         followersText: info?.followersText ?? null,
+        soldByStoreText: info?.soldByStoreText ?? null,
+        regularBuyersText: info?.regularBuyersText ?? null,
         storeLogo: info?.storeLogo ?? null,
         positiveFeedbackPercent: info?.positiveFeedbackPercent ?? null,
         feedbackScore: info?.totalCount ?? null,
@@ -109,13 +155,16 @@ async function passCaptcha(page: Page, config: ScraperConfig, log: Log, label: s
  *
  * Returns the built {@link Seller} plus a `blocked` flag (true when the page stayed behind a captcha
  * or no sellerId could be resolved). Never throws — anti-bot recovery is the caller's call.
+ *
+ * `opts.shipToCountry` is the region the caller is shopping from — see {@link sellerApiOpts} for why
+ * it must be the request's ship-to and not a fixed default.
  */
 export async function scrapeSellerData(
     page: Page,
     pathId: string,
     log: Log,
     config: ScraperConfig,
-    opts: { alreadyOnAllItems?: boolean; knownSellerId?: string | null } = {},
+    opts: { alreadyOnAllItems?: boolean; knownSellerId?: string | null; shipToCountry?: string; fallbackStoreName?: string | null } = {},
 ): Promise<{ seller: Seller; blocked: boolean }> {
     // tsx/esbuild rewrites named functions to call a `__name` helper that doesn't exist in the page
     // context → "ReferenceError: __name is not defined" inside page.evaluate (used by logEgressIp /
@@ -154,15 +203,18 @@ export async function scrapeSellerData(
     }
     const { sellerId } = resolved;
 
-    const apiOpts = { language: config.language, currency: config.currency, country: config.proxyCountry };
-    // Profile + reviews (acs.com MTOP) and products (shoprenderview) run concurrently — independent calls.
-    const [info, sellerReviews, productPreviews] = await Promise.all([
+    const apiOpts = sellerApiOpts(config, opts.shipToCountry);
+    // Profile + benefits + reviews (acs.com MTOP) and products (shoprenderview) run concurrently —
+    // independent calls. `benefit.info` is fired unconditionally, exactly like the store page does:
+    // whether a store has feedback decides whether it ANSWERS with data, not whether it is asked.
+    const [info, benefit, sellerReviews, productPreviews] = await Promise.all([
         fetchSellerInfo(page, sellerId, log, apiOpts),
+        fetchSellerBenefit(page, sellerId, pathId, log, apiOpts),
         fetchSellerReviews(page, sellerId, log, apiOpts, 25),
         fetchSellerProducts(page, sellerId, pathId, log, apiOpts, 10, 10),
     ]);
 
-    const seller = buildSellerDto(pathId, sellerId, info, sellerReviews, productPreviews, resolved.storeName);
+    const seller = buildSellerDto(pathId, sellerId, withBenefits(info, benefit), sellerReviews, productPreviews, resolved.storeName ?? opts.fallbackStoreName ?? null);
     log.info('🏪 seller scraped (API)', {
         pathId,
         sellerId,
@@ -189,16 +241,19 @@ export async function scrapeSellerInline(
     sellerId: string,
     log: Log,
     config: ScraperConfig,
+    shipToCountry?: string,
+    fallbackStoreName: string | null = null,
 ): Promise<{ seller: Seller; blocked: boolean }> {
-    const apiOpts = { language: config.language, currency: config.currency, country: config.proxyCountry };
-    const [info, sellerReviews, productPreviews] = await Promise.all([
+    const apiOpts = sellerApiOpts(config, shipToCountry);
+    const [info, benefit, sellerReviews, productPreviews] = await Promise.all([
         fetchSellerInfo(page, sellerId, log, apiOpts),
+        fetchSellerBenefit(page, sellerId, pathId, log, apiOpts),
         fetchSellerReviews(page, sellerId, log, apiOpts, 25),
         fetchSellerProducts(page, sellerId, pathId, log, apiOpts, 10, 10),
     ]);
     // If everything came back empty, treat as blocked so the caller can fall back to a local browser.
-    const blocked = !info && sellerReviews.length === 0 && productPreviews.length === 0;
-    const seller = buildSellerDto(pathId, sellerId, info, sellerReviews, productPreviews);
+    const blocked = !info && !benefit && sellerReviews.length === 0 && productPreviews.length === 0;
+    const seller = buildSellerDto(pathId, sellerId, withBenefits(info, benefit), sellerReviews, productPreviews, fallbackStoreName);
     log.info('🏪 seller scraped (inline API)', {
         pathId,
         sellerId,
@@ -226,6 +281,8 @@ export async function scrapeSellerLocal(
     log: Log,
     config: ScraperConfig,
     knownSellerId: string | null = null,
+    shipToCountry?: string,
+    fallbackStoreName: string | null = null,
 ): Promise<{ seller: Seller; blocked: boolean }> {
     log.info(`🧭 Seller: launching a local (no-proxy, no-fingerprint) browser for store ${pathId}`);
     const browser = await chromium.launch({
@@ -240,13 +297,16 @@ export async function scrapeSellerLocal(
         // Match the seller_only crawler's `navigationTimeoutSecs: 90` (Playwright defaults to 30s, too short).
         context.setDefaultNavigationTimeout(90_000);
         // Force English + USD via AliExpress's locale cookie (IP-independent), same as the seller crawler.
-        const localeCookieValue = `site=glo&c_tp=${config.currency}&region=${config.proxyCountry}&b_locale=${config.language}&ae_u_p_s=2`;
+        // `region` matches the ship-to we sign into the MTOP payloads, so the browser session and the
+        // API calls it carries do not claim two different markets.
+        const region = shipToCountry ?? config.proxyCountry;
+        const localeCookieValue = `site=glo&c_tp=${config.currency}&region=${region}&b_locale=${config.language}&ae_u_p_s=2`;
         await context.addCookies([
             { name: 'aep_usuc_f', value: localeCookieValue, domain: '.aliexpress.com', path: '/' },
             { name: 'intl_locale', value: config.language, domain: '.aliexpress.com', path: '/' },
         ]);
         const page = await context.newPage();
-        return await scrapeSellerData(page, pathId, log, config, { alreadyOnAllItems: false, knownSellerId });
+        return await scrapeSellerData(page, pathId, log, config, { alreadyOnAllItems: false, knownSellerId, shipToCountry, fallbackStoreName });
     } finally {
         await browser.close().catch(() => undefined);
     }
