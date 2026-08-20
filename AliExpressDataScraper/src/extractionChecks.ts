@@ -179,6 +179,22 @@ export const PRODUCT_CHECKS: FieldCheck[] = [
  * back empty, so a pushed record that is still missing one of these is either a partial block on one
  * of the three seller gateways or a genuine property rename — both worth an error-level line.
  */
+/**
+ * Records with `success: false` — the listing was refused for this region, no such listing exists, or
+ * the scrape never got an answer at all.
+ *
+ * {@link PRODUCT_CHECKS} would report every product field as absent here and grade the record
+ * `broken` — the audit's word for "AliExpress renamed a property, go fix the parser". Nothing is
+ * broken: there is no title, price or image to be had from ANY endpoint, and `errorCode` already
+ * says why. Only the facts such a record genuinely must carry are checked, keeping the `broken`
+ * signal meaningful for records that really did rot.
+ */
+export const NO_LISTING_CHECKS: FieldCheck[] = [
+    { path: 'product.id', severity: 'critical', source: 'URL path /item/{id}.html' },
+    { path: 'errorCode', severity: 'critical', source: 'set by extractProduct / the product handler / the give-up handler' },
+    { path: 'errorMessage', severity: 'warning', source: 'set alongside errorCode' },
+];
+
 export const SELLER_ONLY_CHECKS: FieldCheck[] = [
     { path: 'seller.name', severity: 'critical', source: 'seller.page.info → data.sellerBaseInfo.storeName' },
     {

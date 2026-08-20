@@ -12,9 +12,12 @@ import type { Log } from 'apify';
 import type { Page } from 'playwright';
 
 import type { ScraperConfig } from './config.js';
-import { collectReviewsViaRequest, fetchDescription, fetchPdpDirect, parsePdpResult, waitForPdpResult } from './productApi.js';
+import { storefrontForRequest } from './config.js';
+import { collectReviewsViaRequest, fetchDescription, fetchPdpDirect, parsePdpResult, pdpUnavailability, waitForPdpResult } from './productApi.js';
 import { createAliExpressResponse } from './response.js';
 import { scrapeSellerInline, scrapeSellerLocal } from './sellerProfile.js';
+import type { RegionAddress } from './storefront.js';
+import { addressFromLocaleCookie } from './storefront.js';
 import type { Seller } from './types.js';
 import { normalizeAliExpressStoreUrl } from './url.js';
 
@@ -45,6 +48,27 @@ export interface ExtractResult {
     /** True ⇒ the page was blocked; caller should rotate and retry on a fresh identity. */
     blocked: boolean;
     blockReason?: string;
+    /**
+     * True ⇒ the storefront answered, and its answer was "we do not sell this here". A FINAL result,
+     * not a block: the caller must push the record and must NOT rotate, because no fresh IP changes a
+     * merchandising decision. `response.errorCode`/`errorMessage` carry the detail.
+     */
+    unavailableInRegion?: boolean;
+}
+
+/**
+ * Read the buyer's resolved delivery address off the session's own `aep_usuc_f` cookie.
+ *
+ * AliExpress writes the province/city ids there itself during navigation (from the session's IP geo
+ * or a saved address); the preNavigationHook in `main.ts` carries them across cookie rewrites. A real
+ * browser sends them in every pdp.pc.query, and they narrow availability further than the country
+ * alone. Sessions that were never given them fall back to `''` — the value this payload always sent
+ * before — rather than to an invented id.
+ */
+async function resolveAddress(page: Page, shipToCountry: string): Promise<RegionAddress> {
+    const cookies = await page.context().cookies('https://www.aliexpress.com').catch(() => []);
+    const cookie = cookies.find((c) => c.name === 'aep_usuc_f');
+    return addressFromLocaleCookie(shipToCountry, cookie?.value ?? null);
 }
 
 /** Resolve a store id from a {@link SellerRef}: prefer the `/store/<id>` in the URL, else the seller seq. */
@@ -151,15 +175,49 @@ export async function extractProduct(
     const response = createAliExpressResponse(url);
     response.captureMode = config.mode;
     const shipToCountry = opts.shipToCountry ?? config.defaultShipToCountry;
+    const storefront = storefrontForRequest(shipToCountry, config);
+    const address = await resolveAddress(page, shipToCountry);
+    response.shipToCountry = shipToCountry;
+    response.storefront = storefront.site;
+    log.info('storefront identity for this product', {
+        site: storefront.site,
+        locale: storefront.locale,
+        currency: storefront.currency,
+        province: address.province || '(none)',
+        city: address.city || '(none)',
+    });
 
     // Fire the signed pdp.pc.query ourselves (no bundle wait). Optionally fall back to the page's own
     // intercepted response (batch only). A block means neither yields JSON → rotate cheaply.
-    let result = await fetchPdpDirect(page, response.product.id, log, shipToCountry);
+    let result = await fetchPdpDirect(page, response.product.id, log, address, storefront);
     if (!result && opts.interceptorFallback) {
         result = await waitForPdpResult(page, 8_000);
     }
     if (!result) {
         return { response, blocked: true, blockReason: 'pdp-blocked' };
+    }
+
+    // Checked BEFORE the title: a refused listing carries GLOBAL_DATA and nothing else, so the title
+    // is legitimately absent and the "no title ⇒ blocked" rule below would misread the storefront's
+    // clear answer as an anti-bot block and burn the whole retry budget on it.
+    const refusal = pdpUnavailability(result as Record<string, unknown>);
+    if (refusal) {
+        response.success = false;
+        response.errorCode = 'unavailable_in_region';
+        // AliExpress's own code goes in the TEXT, not in `errorCode`: it is one of many such codes and
+        // would force a backend to keep up with a vocabulary that is not ours. The three codes stay
+        // stable; the specifics stay readable.
+        response.errorMessage = [
+            refusal.message ?? `The ${storefront.site} storefront does not sell this listing to ${shipToCountry}.`,
+            `(${refusal.errorCode})`,
+        ].join(' ');
+        log.info('storefront does not sell this listing to the requested region — recording as unavailable.', {
+            url,
+            shipToCountry,
+            site: storefront.site,
+            reasonCode: refusal.errorCode,
+        });
+        return { response, blocked: false, unavailableInRegion: true };
     }
 
     const parsed = parsePdpResult(result as Record<string, unknown>);
@@ -204,7 +262,7 @@ export async function extractProduct(
 
     // Reviews — fired in PARALLEL via the request context (token already warm from pdp.pc.query).
     const sellerSeq = response.sellerRef?.platformSellerId ?? null;
-    const apiReviews = response.product.id ? await collectReviewsViaRequest(page, response.product.id, sellerSeq, log, 5, shipToCountry) : null;
+    const apiReviews = response.product.id ? await collectReviewsViaRequest(page, response.product.id, sellerSeq, log, 5, shipToCountry, storefront) : null;
     if (apiReviews) {
         response.product.reviewsSummary = apiReviews;
     }

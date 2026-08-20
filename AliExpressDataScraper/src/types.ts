@@ -17,6 +17,20 @@ export interface ProductSellerResponse {
     /** ISO-8601 timestamp of when the page was captured. */
     capturedAt: string;
     captureMode: CaptureMode;
+    /** The ship-to country this URL was read under (ISO-3166 alpha-2). */
+    shipToCountry: string;
+    /** AliExpress storefront code the data came from — `esp`, `usa`, `glo`, … */
+    storefront: string;
+    /**
+     * The one field to branch on: `true` ⇒ product data is present, `false` ⇒ it is not and
+     * {@link errorCode} says why. Every record carries it, so nothing downstream has to tell two
+     * record shapes apart.
+     */
+    success: boolean;
+    /** `null` when {@link success}. Otherwise one of {@link ScrapeErrorCode}. */
+    errorCode: ScrapeErrorCode | null;
+    /** `null` when {@link success}. Otherwise the detail behind {@link errorCode}, for a human. */
+    errorMessage: string | null;
     /** The scraped product, or `null` in `seller_only` runs (no product page is visited). */
     product: Product | null;
     sellerRef: SellerRef | null;
@@ -26,6 +40,22 @@ export interface ProductSellerResponse {
     /** Health of this record's extraction — see {@link ExtractionReport}. Filled just before push. */
     extraction: ExtractionReport;
 }
+
+/**
+ * Why a record carries no product. Deliberately three codes, not more: they are the three DIFFERENT
+ * follow-ups a caller can take, and the specific cause (which captcha, which AliExpress ban code)
+ * lives in `errorMessage` rather than multiplying the set a backend has to switch on.
+ *
+ *   - `not_found` — no listing with this item id exists (AliExpress served its 404 page). The URL is
+ *     wrong or the listing was deleted. Retrying, in any region, cannot produce it.
+ *   - `unavailable_in_region` — AliExpress answered and refused the listing for THIS market
+ *     (`bigBossBan`). Re-running with a different ship-to country is worth doing.
+ *   - `blocked` — we never got an answer: anti-bot block, timeout or transport error, after the retry
+ *     budget was spent. The ONLY code where re-running the same URL unchanged may still succeed.
+ *
+ * The first two are definitive answers from AliExpress; `blocked` is the absence of an answer.
+ */
+export type ScrapeErrorCode = 'not_found' | 'unavailable_in_region' | 'blocked';
 
 // --- Extraction health ---------------------------------------------------------------------------
 

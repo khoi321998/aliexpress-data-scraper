@@ -30,6 +30,12 @@
             "description": "Two-letter country code (ISO 3166-1 alpha-2, e.g. ES, DE, VN) to use as the delivery destination for every URL. Some listings are only available for certain destinations and return an error when queried for the US. The scraper also routes its proxy through this country, so the delivery address and the connection agree. Leave empty to auto-detect per URL from the address you pasted (e.g. https://es.aliexpress.com/... or ?gatewayAdapt=glo2esp becomes Spain), falling back to US when the URL carries no region.",
             "editor": "textfield"
         },
+        "matchStorefrontLocale": {
+            "title": "Read Each Product On Its Local Storefront",
+            "type": "boolean",
+            "description": "Read every product on the delivery country's own storefront, exactly as a shopper there does — Spanish store, prices in EUR, page in Spanish. This is what makes availability truthful: the global catalogue still answers for listings a local storefront has withdrawn, so with this off a product a Spanish shopper cannot order is scraped anyway, priced in USD and with no delivery date. With it on, such a listing is recorded with success = false and errorCode = \"unavailable_in_region\" instead. The trade-off is comparability: prices arrive in each market's own currency and review text in its own language. Turn off to read every region from the global catalogue in USD and English.",
+            "default": true
+        },
         "residentialProxy": {
             "title": "Use Residential Proxy",
             "type": "boolean",

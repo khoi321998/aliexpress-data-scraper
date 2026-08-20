@@ -63,6 +63,14 @@ export function createAliExpressResponse(url: string): ProductSellerResponse & {
         url,
         capturedAt: new Date().toISOString(),
         captureMode: 'product_only',
+        // Overwritten by `extractProduct` once the ship-to and storefront for this request resolve.
+        shipToCountry: '',
+        storefront: '',
+        // Optimistic default. A record only reaches the dataset via a successful pdp.pc.query, so the
+        // failure paths (`routes.ts`, the give-up handler in `main.ts`) are the ones that flip it.
+        success: true,
+        errorCode: null,
+        errorMessage: null,
         product: {
             id: extractAliExpressItemId(url) ?? '',
             title: '',
@@ -118,6 +126,12 @@ export function createSellerOnlyResponse(storeUrl: string, storeId: string): Pro
         url: storeUrl,
         capturedAt: new Date().toISOString(),
         captureMode: 'seller_only',
+        // This pipeline reads a store page directly, with no ship-to region and no storefront switch.
+        shipToCountry: '',
+        storefront: '',
+        success: true,
+        errorCode: null,
+        errorMessage: null,
         product: null,
         sellerRef: {
             platformSellerId: storeId,

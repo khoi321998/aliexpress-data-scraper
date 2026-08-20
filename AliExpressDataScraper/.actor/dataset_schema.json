@@ -6,7 +6,7 @@
         "overview": {
             "title": "Overview",
             "transformation": {
-                "fields": ["title", "url", "extraction.status"]
+                "fields": ["title", "url", "success", "errorCode", "errorMessage", "extraction.status"]
             },
             "display": {
                 "component": "table",
@@ -18,6 +18,18 @@
                     "url": {
                         "label": "URL",
                         "format": "link"
+                    },
+                    "success": {
+                        "label": "OK",
+                        "format": "boolean"
+                    },
+                    "errorCode": {
+                        "label": "Error",
+                        "format": "text"
+                    },
+                    "errorMessage": {
+                        "label": "Error detail",
+                        "format": "text"
                     },
                     "extraction.status": {
                         "label": "Extraction",

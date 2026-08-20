@@ -19,6 +19,8 @@ import type { Page } from 'playwright';
 
 import { parsePrice } from './pricing.js';
 import { parseProductReviews } from './reviewsApi.js';
+import type { RegionAddress, Storefront } from './storefront.js';
+import { GLOBAL_STOREFRONT } from './storefront.js';
 import type { Description, Media, Pricing, ReviewSample, ReviewsSummary, SellerRef, Shipping, Specification, Stock } from './types.js';
 import { storefrontHost } from './url.js';
 
@@ -50,15 +52,20 @@ interface Gateway {
  * "403 from Spain" symptom. So US keeps the `.us` gateway it has always used (that path works and
  * we don't want to disturb it), and every other ship-to goes to the global `.com` gateway, which is
  * the only one that serves non-US regions.
+ *
+ * `site` is NOT the gateway. The `.com` gateway answers for every storefront; which CATALOGUE it
+ * answers from is decided by `ext.site`, and that comes from the caller's {@link Storefront} — see
+ * `storefront.ts` for why sending `glo` from a Spanish session reports availability Spain does not
+ * have.
  */
-function gatewayFor(shipToCountry: string): Gateway {
+function gatewayFor(shipToCountry: string, storefront: Storefront): Gateway {
     if (shipToCountry.toUpperCase() === 'US') {
         return { acsBase: 'https://acs.aliexpress.us/h5', origin: 'https://www.aliexpress.us', site: 'usa', host: 'www.aliexpress.us' };
     }
     // Claim the same storefront the crawler actually navigated to (`es.aliexpress.com`, ...), so the
     // referer and `ext.host` match the page the signed call is supposed to be coming from.
     const host = storefrontHost(shipToCountry);
-    return { acsBase: 'https://acs.aliexpress.com/h5', origin: `https://${host}`, site: 'glo', host };
+    return { acsBase: 'https://acs.aliexpress.com/h5', origin: `https://${host}`, site: storefront.site, host };
 }
 
 /** Per-page holder for the intercepted pdp.pc.query JSON, resolved by the response listener. */
@@ -161,11 +168,17 @@ async function readMtopToken(page: Page, acsBase: string): Promise<string> {
 /**
  * Build the `data` payload the PC page sends for pdp.pc.query (locale/region inline, not cookie).
  *
- * `country` is the ship-to and it decides whether the listing resolves at all: a seller who does not
- * ship to the requested country answers with an empty `result`, which the caller cannot distinguish
- * from an anti-bot block. It must agree with the `region` in the page's `aep_usuc_f` cookie.
+ * `address.country` is the ship-to and it decides whether the listing resolves at all: a seller who
+ * does not ship to the requested country answers with an empty `result`, which the caller cannot
+ * distinguish from an anti-bot block. It must agree with the `region` in the page's `aep_usuc_f`
+ * cookie.
+ *
+ * `address.province`/`city` are AliExpress's own region ids for the buyer's resolved delivery
+ * address. A real browser always carries them and they narrow availability further than the country
+ * alone (a seller can serve a country but not an island region). We forward whatever the session was
+ * given and send `''` otherwise — never a made-up id.
  */
-function buildPdpData(productId: string | number, shipToCountry: string, gateway: Gateway): string {
+function buildPdpData(productId: string | number, address: RegionAddress, storefront: Storefront, gateway: Gateway): string {
     const ext = JSON.stringify({
         foreverRandomToken: randomBytes(16).toString('hex'),
         site: gateway.site,
@@ -176,11 +189,11 @@ function buildPdpData(productId: string | number, shipToCountry: string, gateway
     });
     return JSON.stringify({
         productId: String(productId),
-        _lang: 'en_US',
-        _currency: 'USD',
-        country: shipToCountry,
-        province: '',
-        city: '',
+        _lang: storefront.locale,
+        _currency: storefront.currency,
+        country: address.country,
+        province: address.province,
+        city: address.city,
         channel: '',
         pdp_ext_f: '',
         pdpNPI: '',
@@ -254,9 +267,15 @@ async function callMtopRequest(page: Page, api: string, data: string, log: Log, 
  * needed beyond the session bootstrap). Returns the `data.result` module map, or `null` when blocked
  * (e.g. `FAIL_SYS_USER_VALIDATE`) so the caller rotates to a fresh session.
  */
-export async function fetchPdpDirect(page: Page, productId: string | number, log: Log, shipToCountry = 'US'): Promise<Record<string, unknown> | null> {
-    const gateway = gatewayFor(shipToCountry);
-    const json = await callMtopRequest(page, PDP_API, buildPdpData(productId, shipToCountry, gateway), log, gateway);
+export async function fetchPdpDirect(
+    page: Page,
+    productId: string | number,
+    log: Log,
+    address: RegionAddress = { country: 'US', province: '', city: '' },
+    storefront: Storefront = GLOBAL_STOREFRONT,
+): Promise<Record<string, unknown> | null> {
+    const gateway = gatewayFor(address.country, storefront);
+    const json = await callMtopRequest(page, PDP_API, buildPdpData(productId, address, storefront, gateway), log, gateway);
     if (!json) {
         return null;
     }
@@ -266,18 +285,65 @@ export async function fetchPdpDirect(page: Page, productId: string | number, log
     }
     const { ret } = json as { ret?: unknown[] };
     // An empty result here is ambiguous: an anti-bot block OR a listing the seller simply won't ship
-    // to `shipToCountry`. Log the region so the second case is diagnosable from the run log.
-    log.warning('pdp.pc.query — no result (block or unavailable for ship-to).', { ret: Array.isArray(ret) ? ret[0] : null, shipToCountry });
+    // to the requested address. Log the region so the second case is diagnosable from the run log.
+    log.warning('pdp.pc.query — no result (block or unavailable for ship-to).', {
+        ret: Array.isArray(ret) ? ret[0] : null,
+        shipToCountry: address.country,
+        site: gateway.site,
+    });
     return null;
 }
 
-/** Build the `data` payload for one star-filtered page of product reviews. */
-function buildReviewData(productId: string | number, sellerSeq: string | number | null, filter: number, pageSize: number, shipToCountry: string): string {
+/** Why a storefront refuses to sell a listing to the requested address. */
+export interface PdpUnavailability {
+    /** AliExpress's own code, e.g. `SITEM_BAN_NO_AVAIL_SKU`. */
+    errorCode: string;
+    /** The shopper-facing sentence AliExpress renders in place of the buy box, in the storefront's language. */
+    message: string | null;
+}
+
+/**
+ * Detect the "this storefront does not sell this item to you" answer.
+ *
+ * It is NOT an error response: `ret` is `SUCCESS`, HTTP is 200, and `data.result` is a well-formed
+ * object — it just holds `GLOBAL_DATA` alone, with every product module (PRODUCT_TITLE, PRICE,
+ * HEADER_IMAGE_PC, …) absent and `globalData.bigBossBan: true` in their place.
+ *
+ * Without this check the caller sees a result object with no title and can only read it as an
+ * anti-bot block, which sends the crawler through its full retry-and-rotate budget chasing a listing
+ * no fresh IP will ever return. `bigBossBan` is a merchandising decision, not a defence.
+ */
+export function pdpUnavailability(result: Record<string, unknown>): PdpUnavailability | null {
+    const globalData = asRecord(asRecord(result.GLOBAL_DATA).globalData);
+    if (globalData.bigBossBan !== true) {
+        return null;
+    }
+    const code = typeof globalData.errorCode === 'string' ? globalData.errorCode.trim() : '';
+    const tip = typeof globalData.bigBossBanTip === 'string' ? globalData.bigBossBanTip.trim() : '';
+    return { errorCode: code || 'BIG_BOSS_BAN', message: tip || null };
+}
+
+/**
+ * Build the `data` payload for one star-filtered page of product reviews.
+ *
+ * `_lang` follows the storefront rather than being pinned to `en_US`: the session's `aep_usuc_f`
+ * cookie already claims that locale, and AliExpress serves review content from the cookie regardless
+ * of what this field says (the same reason the currency is pinned there and not here). Sending a
+ * locale the session contradicts buys nothing and only makes the call look synthetic.
+ */
+function buildReviewData(
+    productId: string | number,
+    sellerSeq: string | number | null,
+    filter: number,
+    pageSize: number,
+    shipToCountry: string,
+    storefront: Storefront,
+): string {
     const data: Record<string, unknown> = {
         productId: String(productId),
         page: 1,
         pageSize,
-        _lang: 'en_US',
+        _lang: storefront.locale,
         filter: String(filter),
         sort: 'complex_default',
         country: shipToCountry,
@@ -303,14 +369,17 @@ export async function collectReviewsViaRequest(
     log: Log,
     perStar = 5,
     shipToCountry = 'US',
+    storefront: Storefront = GLOBAL_STOREFRONT,
 ): Promise<ReviewsSummary | null> {
     const stars = [5, 4, 3, 2, 1];
     // Same gateway as the pdp call — the `_m_h5_tk` token is per-gateway, so switching hosts here
     // would throw away the warm token and re-run the token dance five times over.
-    const gateway = gatewayFor(shipToCountry);
+    const gateway = gatewayFor(shipToCountry, storefront);
     const parsed = await Promise.all(
         stars.map(async (star) =>
-            parseProductReviews(await callMtopRequest(page, REVIEWS_API, buildReviewData(productId, sellerSeq, star, perStar, shipToCountry), log, gateway)),
+            parseProductReviews(
+                await callMtopRequest(page, REVIEWS_API, buildReviewData(productId, sellerSeq, star, perStar, shipToCountry, storefront), log, gateway),
+            ),
         ),
     );
 

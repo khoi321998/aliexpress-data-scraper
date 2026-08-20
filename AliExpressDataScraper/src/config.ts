@@ -10,6 +10,8 @@
 // one. We deliberately do NOT solve captchas — the Alibaba slider is solver-resistant and
 // rotating off a clean residential IP is cheaper and more reliable.
 
+import type { Storefront } from './storefront.js';
+import { GLOBAL_STOREFRONT, storefrontFor } from './storefront.js';
 import { detectShipToCountry } from './url.js';
 
 /**
@@ -41,6 +43,11 @@ export interface ScraperInput {
      * serve. Non-US ship-to already uses residential automatically — see {@link proxyGroupsFor}.
      */
     residentialProxy?: boolean;
+    /**
+     * Ask each ship-to country's OWN storefront (`site=esp`, prices in EUR, page in Spanish) instead
+     * of the global catalogue. See {@link ScraperConfig.matchStorefrontLocale}. Default `true`.
+     */
+    matchStorefrontLocale?: boolean;
 }
 
 /** Fully-resolved configuration consumed by the crawler. */
@@ -95,6 +102,22 @@ export interface ScraperConfig {
     /** Fixed to "en_US" — forced via the `aep_usuc_f` cookie. */
     language: string;
 
+    /**
+     * Read each product on the ship-to country's OWN storefront, exactly as a buyer there does:
+     * `site=esp`, `b_locale=es_ES`, `c_tp=EUR` — instead of the global catalogue in USD/English.
+     *
+     * This is an AVAILABILITY switch, not a cosmetic one. The global catalogue answers for listings a
+     * localized storefront has withdrawn, so with this off a product that a Spanish buyer cannot order
+     * still lands in the dataset looking complete — priced in USD, with an empty delivery estimate.
+     * With it on, AliExpress says so outright (`bigBossBan`) and the record carries `success: false`
+     * with `errorCode: 'unavailable_in_region'`.
+     *
+     * The cost is comparability: prices arrive in the storefront's currency (EUR, BRL, …) and review
+     * and description text in its language, so records from different regions are no longer directly
+     * comparable. Set to `false` to restore the previous global-catalogue behaviour exactly.
+     */
+    matchStorefrontLocale: boolean;
+
     sessionPool: {
         /** Small pool keeps residential IPs sticky and reused instead of churning. */
         maxPoolSize: number;
@@ -145,6 +168,7 @@ export function buildConfig(input: ScraperInput): ScraperConfig {
         twoCaptchaApiKey: input.twoCaptchaApiKey || process.env.TWOCAPTCHA_API_KEY || undefined,
         currency: 'USD',
         language: 'en_US',
+        matchStorefrontLocale: input.matchStorefrontLocale ?? true,
         sessionPool: {
             // A touch larger than concurrency so a retired session can be replaced without stalling.
             maxPoolSize: Math.max(maxConcurrency + 2, 4),
@@ -163,6 +187,17 @@ export function buildConfig(input: ScraperInput): ScraperConfig {
  */
 export function resolveShipToCountry(rawUrl: string, config: ScraperConfig): string {
     return config.shipToCountry ?? detectShipToCountry(rawUrl) ?? config.defaultShipToCountry;
+}
+
+/**
+ * The storefront identity to present for ONE ship-to country under the current config — the single
+ * place {@link ScraperConfig.matchStorefrontLocale} is honoured.
+ *
+ * Off ⇒ the global catalogue in USD/English for every region, which is what every call sent before
+ * the flag existed. On ⇒ that country's own storefront.
+ */
+export function storefrontForRequest(shipToCountry: string, config: ScraperConfig): Storefront {
+    return config.matchStorefrontLocale ? storefrontFor(shipToCountry) : GLOBAL_STOREFRONT;
 }
 
 /**

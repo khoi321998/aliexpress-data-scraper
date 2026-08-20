@@ -7,11 +7,14 @@ import { Actor, log } from 'apify';
 
 import type { ScraperInput } from './config.js';
 // this is an ESM project, so relative imports must include the `.js` extension even from TS.
-import { buildConfig, proxyGroupsFor, resolveShipToCountry } from './config.js';
+import { buildConfig, proxyGroupsFor, resolveShipToCountry, storefrontForRequest } from './config.js';
 import { armPdpInterceptor } from './productApi.js';
-import { createRouter, rotationStats } from './routes.js';
+import { pushRecord } from './pushRecord.js';
+import { createAliExpressResponse } from './response.js';
+import { blockReasonFromError, createRouter, rotationStats } from './routes.js';
 import { runSellerOnly } from './sellerPipeline.js';
 import { applyRegionOverrides, applyStealthInitScript, CHROME_LAUNCH_ARGS, FINGERPRINT_OPTIONS } from './stealth.js';
+import { buildLocaleCookie, parseLocaleCookie } from './storefront.js';
 import { normalizeAliExpressUrl } from './url.js';
 
 // Load a local `.env` (e.g. TWOCAPTCHA_API_KEY) for local runs. On the Apify platform these
@@ -226,21 +229,39 @@ const crawler = new PlaywrightCrawler({
             // AliExpress decides the price currency from the `aep_usuc_f` locale cookie (and the proxy
             // IP geo), NOT from the `_currency` field in the pdp.pc.query payload — that field is
             // ignored, so a Swedish residential IP yields SEK prices despite `_currency: 'USD'`. Force
-            // the cookie before navigation (same lever the seller pipeline uses) to pin USD regardless
-            // of which residential IP we land on. Set on both AliExpress domains we touch (.com for
-            // navigation, .us for the acs API host).
+            // the cookie before navigation (same lever the seller pipeline uses) so the session prices
+            // in one predictable currency regardless of which residential IP we land on. Set on both
+            // AliExpress domains we touch (.com for navigation, .us for the acs API host).
             //
-            // `region` is the ship-to, and it is the one field we do NOT pin globally: a listing the
-            // seller won't ship to the US comes back blocked/empty for a US region no matter how clean
-            // the session is, so we replay the region the start URL came from (see `resolveShipToCountry`).
-            // Currency + language stay USD/en_US so the dataset is comparable across regions.
+            // `region` is the ship-to: a listing the seller won't ship to the US comes back
+            // blocked/empty for a US region no matter how clean the session is, so we replay the region
+            // the start URL came from (see `resolveShipToCountry`).
+            //
+            // `site`/`c_tp`/`b_locale` come from that region's storefront (see `storefront.ts`), so the
+            // cookie, the signed MTOP payloads and the host we navigate to all name ONE market. Under
+            // `matchStorefrontLocale: false` they collapse back to the global `glo`/USD/en_US identity
+            // this hook used to hard-code.
             const shipToCountry = shipToOf(request);
-            const localeCookieValue = `site=glo&c_tp=${config.currency}&region=${shipToCountry}&b_locale=${config.language}&ae_u_p_s=2`;
+            const storefront = storefrontForRequest(shipToCountry, config);
+            // Preserve any province/city AliExpress has already resolved for this session — they are
+            // part of the ship-to address and re-writing the cookie without them would throw away a
+            // narrower availability answer than the country alone can give.
+            const existing = (await page.context().cookies('https://www.aliexpress.com')).find((c) => c.name === 'aep_usuc_f');
+            const carried = existing ? parseLocaleCookie(existing.value) : {};
+            const localeCookieValue = buildLocaleCookie({
+                site: storefront.site,
+                province: carried.province ?? '',
+                city: carried.city ?? '',
+                c_tp: storefront.currency,
+                region: shipToCountry,
+                b_locale: storefront.locale,
+                ae_u_p_s: '2',
+            });
             await page.context().addCookies([
                 { name: 'aep_usuc_f', value: localeCookieValue, domain: '.aliexpress.com', path: '/' },
-                { name: 'intl_locale', value: config.language, domain: '.aliexpress.com', path: '/' },
+                { name: 'intl_locale', value: storefront.locale, domain: '.aliexpress.com', path: '/' },
                 { name: 'aep_usuc_f', value: localeCookieValue, domain: '.aliexpress.us', path: '/' },
-                { name: 'intl_locale', value: config.language, domain: '.aliexpress.us', path: '/' },
+                { name: 'intl_locale', value: storefront.locale, domain: '.aliexpress.us', path: '/' },
             ]);
             // We only navigate to bootstrap the anti-bot cookies the signed `pdp.pc.query` call
             // needs, then fetch the product JSON ourselves — so block the heavy subresources
@@ -272,19 +293,30 @@ const crawler = new PlaywrightCrawler({
     ],
 
     // --- Give-up handling -----------------------------------------------------------------
+    // Giving up still produces a record in the SAME shape as a successful one — same envelope, same
+    // fields — with `success: false` carrying the why. A separate `{ error: true, … }` shape used to
+    // land here, which forced every consumer to branch on record shape before it could read anything;
+    // now one boolean answers "did this work" for every row alike.
     failedRequestHandler: async ({ request, log: reqLog }, error) => {
+        const message = error instanceof Error ? error.message : String(error);
         reqLog.error('Request failed after all retries — giving up.', {
             url: request.url,
             retries: request.retryCount,
-            error: error instanceof Error ? error.message : String(error),
+            error: message,
         });
-        await Actor.pushData({
-            url: request.url,
-            error: true,
-            reason: error instanceof Error ? error.message : String(error),
-            retries: request.retryCount,
-            capturedAt: new Date().toISOString(),
-        });
+        const shipToCountry = shipToOf(request);
+        const response = createAliExpressResponse(request.url);
+        response.captureMode = config.mode;
+        response.shipToCountry = shipToCountry;
+        response.storefront = storefrontForRequest(shipToCountry, config).site;
+        response.success = false;
+        response.errorCode = 'blocked';
+        // The classified reason and the attempt count ride in the text rather than as fields of their
+        // own — they are for a human reading a failure, not something a backend switches on.
+        // `retryCount` counts RE-tries, so the first attempt has to be added back in.
+        const reason = blockReasonFromError(error);
+        response.errorMessage = `${reason ? `${reason}: ` : ''}${message} (gave up after ${request.retryCount + 1} attempts)`;
+        await pushRecord(response, reqLog);
     },
 });
 
