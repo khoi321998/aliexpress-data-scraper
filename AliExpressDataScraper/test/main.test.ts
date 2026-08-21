@@ -173,6 +173,25 @@ describe('pdp.pc.query parsing', () => {
         expect(p.descUrl).toBe('https://pdp.aliexpress-media.com/desc.htm?x=1');
     });
 
+    // Sellers sometimes drop marketing copy as markup into a prop value (`<ul><li>…`). The output
+    // must be plain text - tags stripped, entities decoded, bullets separated.
+    it('flattens markup in a specification value to plain text', () => {
+        const p = parsePdpResult({
+            PRODUCT_PROP_PC: {
+                showedProps: [
+                    { attrName: 'Features', attrValue: '<ul><li> Doble compartimento </li><li> Correas acolchadas &amp; ajustables </li></ul>' },
+                    { attrName: 'Care', attrValue: '<p>Machine washable.</p><p>Do not bleach</p>' },
+                    { attrName: 'Material', attrValue: '  Polyester  ' },
+                ],
+            },
+        });
+        expect(p.specifications).toEqual([
+            { name: 'Features', value: 'Doble compartimento; Correas acolchadas & ajustables' },
+            { name: 'Care', value: 'Machine washable. Do not bleach' },
+            { name: 'Material', value: 'Polyester' },
+        ]);
+    });
+
     // --- currency priority ladder (see parseCurrencyCode) ---------------------------------------
     // Rung 1 must stay ahead of everything: listings that already resolved from the selected SKU
     // keep resolving from it, even when a variant disagrees.

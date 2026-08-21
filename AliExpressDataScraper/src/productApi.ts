@@ -533,6 +533,30 @@ function parseMedia(result: Record<string, unknown>): Media {
     return { images, videos };
 }
 
+/**
+ * Some sellers put markup in a prop value — most often a `<ul><li>…</li></ul>` bullet list of
+ * marketing copy. Flatten it to plain text: block/line breaks become `; ` separators, every other
+ * tag is dropped, entities are decoded and whitespace is collapsed. Text without tags is untouched
+ * beyond trimming.
+ */
+function propValueToText(value: string): string {
+    if (!value.includes('<')) {
+        return decodeEntities(value).replace(/\s+/g, ' ').trim();
+    }
+    return decodeEntities(
+        value
+            .replace(/<\s*(?:br|\/li|\/p|\/div|\/tr|\/h[1-6])\b[^>]*>/gi, '\n')
+            .replace(/<[^>]*>/g, ' '),
+    )
+        .split('\n')
+        .map((part) => part.replace(/\s+/g, ' ').trim())
+        .filter((part) => part !== '')
+        .join('; ')
+        // Items that already end in sentence punctuation don't need the separator.
+        .replace(/([.;:!?])\s*;\s*/g, '$1 ')
+        .trim();
+}
+
 /** Specifications — PRODUCT_PROP_PC.showedProps, each `{ attrName, attrValue }`. */
 function parseSpecifications(result: Record<string, unknown>): Specification[] {
     const props = asRecord(result.PRODUCT_PROP_PC).showedProps;
@@ -543,8 +567,8 @@ function parseSpecifications(result: Record<string, unknown>): Specification[] {
         .map((p) => {
             const r = asRecord(p);
             return {
-                name: typeof r.attrName === 'string' ? r.attrName.trim() : '',
-                value: typeof r.attrValue === 'string' ? r.attrValue.trim() : '',
+                name: typeof r.attrName === 'string' ? propValueToText(r.attrName) : '',
+                value: typeof r.attrValue === 'string' ? propValueToText(r.attrValue) : '',
             };
         })
         .filter((s) => s.name !== '' && s.value !== '');
