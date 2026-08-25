@@ -193,16 +193,16 @@ describe('pdp.pc.query parsing', () => {
     });
 
     // --- shipping ETA (see parseShipping) -------------------------------------------------------
-    // The ETA is localized: es.aliexpress.com says "Entrega estimada:", never "Delivery:". Matching
-    // the English word left every non-English storefront with a null, so the block is found by its
-    // template key (`medusaKey` starting `eta`) instead.
+    // The es.aliexpress.com shape: one block carrying label and value together, in Spanish. The
+    // engine's own dates win over the prose, so the field reads the same as it does for US.
     it('reads the delivery estimate from a non-English storefront', () => {
         const p = parsePdpResult({
             SHIPPING: {
+                selectedDeliveryOptionCode: 'M2A_ES_DBS',
                 deliveryLayoutInfo: [
                     {
                         additionLayout: [{ medusaKey: 'tracking_unavailable@others', content: 'Seguimiento no disponible' }],
-                        bizData: { displayEtaMinDate: '28 de AGO.', displayEtaMaxDate: '28 de AGO.' },
+                        bizData: { deliveryOptionCode: 'M2A_ES_DBS', displayEtaMinDate: '28 de AGO.', displayEtaMaxDate: '28 de AGO.' },
                         contentLayout: [
                             [
                                 {
@@ -216,19 +216,62 @@ describe('pdp.pc.query parsing', () => {
                 ],
             },
         });
-        expect(p.shipping.deliveryTimeText).toBe('antes del viernes 28 de AGO.');
+        // Min and max are the same day — a range would read "28 de AGO. - 28 de AGO.".
+        expect(p.shipping.deliveryTimeText).toBe('28 de AGO.');
     });
 
-    // Last resort: the layout carries no ETA block at all, but bizData still holds the dates it
-    // would have been rendered from.
-    it('falls back to the bizData ETA dates when no ETA block is present', () => {
+    // The aliexpress.us shape: label and value are SEPARATE blocks. Matching the word "delivery"
+    // hit the label-only block and recorded a bare "Delivery:" — the value lives one block over.
+    it('reads the delivery estimate when the label and the dates are separate blocks', () => {
+        const p = parsePdpResult({
+            SHIPPING: {
+                selectedDeliveryOptionCode: 'CAINIAO_FULFILLMENT_STD',
+                deliveryLayoutInfo: [
+                    {
+                        bizData: { deliveryOptionCode: 'CAINIAO_FULFILLMENT_STD', displayEtaMinDate: 'Aug. 31', displayEtaMaxDate: 'Sep. 08' },
+                        contentLayout: [
+                            [
+                                { medusaKey: 'Global_Version_DeliveryTitle@deliveryTime', content: '<span style="color: #666666;">Delivery:</span>' },
+                                { medusaKey: 'TimeAB_US_DeliveryRangeTime@deliveryTime', content: '<span><strong>Aug. 31 - Sep. 08</strong></span>' },
+                                { medusaKey: 'TimeAB_JZ_OTD_DistributedMap_US@deliveryTime', content: '<span>(77.7% ≤ 10 days) </span>' },
+                            ],
+                        ],
+                    },
+                ],
+            },
+        });
+        expect(p.shipping.deliveryTimeText).toBe('Aug. 31 - Sep. 08');
+    });
+
+    // Same US block split, but with the engine's dates absent — the value block still has to win
+    // over the label block that precedes it.
+    it('never returns the bare label when the ETA dates are missing', () => {
         const p = parsePdpResult({
             SHIPPING: {
                 deliveryLayoutInfo: [
                     {
-                        bizData: { displayEtaMinDate: 'Sep 02', displayEtaMaxDate: 'Sep 09' },
-                        titleLayout: [[{ medusaKey: 'Global_Version_freeshipping@freightCost', content: '<strong>Free shipping</strong>' }]],
+                        contentLayout: [
+                            [
+                                { medusaKey: 'Global_Version_DeliveryTitle@deliveryTime', content: '<span>Delivery:</span>' },
+                                { medusaKey: 'TimeAB_US_DeliveryRangeTime@deliveryTime', content: '<span><strong>Aug. 31 - Sep. 08</strong></span>' },
+                            ],
+                        ],
                     },
+                ],
+            },
+        });
+        expect(p.shipping.deliveryTimeText).toBe('Aug. 31 - Sep. 08');
+    });
+
+    // Only the selected option describes the shipment the buyer is being shown; the cheaper/slower
+    // alternatives sit in the same array.
+    it('takes the ETA of the selected delivery option, not the first one', () => {
+        const p = parsePdpResult({
+            SHIPPING: {
+                selectedDeliveryOptionCode: 'FAST',
+                deliveryLayoutInfo: [
+                    { bizData: { deliveryOptionCode: 'CHEAP', displayEtaMinDate: 'Oct 01', displayEtaMaxDate: 'Oct 20' } },
+                    { bizData: { deliveryOptionCode: 'FAST', displayEtaMinDate: 'Sep 02', displayEtaMaxDate: 'Sep 09' } },
                 ],
             },
         });

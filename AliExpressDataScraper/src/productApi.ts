@@ -631,20 +631,35 @@ function stripEtaLabel(text: string): string {
 }
 
 /**
- * Shipping — the delivery estimate shown under the buy box, in three tiers.
+ * Template keys of the block that holds the ETA VALUE, across the layouts AliExpress ships:
+ * `eta_content_Local_Plus_2` (es/global) and `TimeAB_US_DeliveryRangeTime@deliveryTime` (us).
+ */
+const ETA_BLOCK_KEY_RE = /^eta|deliveryrangetime|deliverydate/i;
+
+/**
+ * Shipping — the delivery estimate shown under the buy box.
  *
- * The estimate is a LOCALIZED string: `Delivery: Sep 02 - 10` on the global site but
- * `Entrega estimada: antes del viernes 28 de AGO.` on `es.aliexpress.com`, `Livraison…` on the
- * French one, and so on. Matching the English word "delivery" therefore found nothing on every
- * non-English storefront — which is why ES runs recorded a null here. We locate the block
- * structurally instead, and only fall back to language:
+ * Two things make this harder than reading one field. The estimate is LOCALIZED (`Delivery:` on the
+ * global site, `Entrega estimada:` on `es.aliexpress.com`, `Livraison…` on the French one), AND the
+ * storefronts disagree on how the line is cut into blocks: ES renders label and value as one block
+ * (`Entrega estimada: antes del viernes 28 de AGO.`), while US splits them —
+ * `Global_Version_DeliveryTitle@deliveryTime` holds a bare `Delivery:` and
+ * `TimeAB_US_DeliveryRangeTime@deliveryTime` holds `Aug. 31 - Sep. 08`. Matching the word
+ * "delivery" therefore yielded nothing on ES and the naked label `"Delivery:"` on US.
  *
- *   1. `medusaKey` starting with `eta` — AliExpress's own id for the ETA block, identical in every
- *      locale (`eta_content_Local_Plus_2` in the ES payload).
- *   2. a block whose text still reads `…delivery: <value>` — the older global-site shape, kept so
- *      payloads that carry no medusaKey keep working.
- *   3. `bizData.displayEtaMinDate`/`displayEtaMaxDate` — the pre-rendered dates the layout is built
- *      from. Localized too, but present even when the HTML block is absent.
+ * So the layout text is the FALLBACK, not the source. In order:
+ *
+ *   1. `bizData.displayEtaMinDate`/`displayEtaMaxDate` — the dates AliExpress's own ETA engine
+ *      produced, which every storefront carries and no storefront wraps in prose. They render the
+ *      same range the page shows (`Aug. 31` + `Sep. 08` → `Aug. 31 - Sep. 08`), so the field reads
+ *      alike in every market instead of following each locale's sentence structure.
+ *   2. the ETA block by template key ({@link ETA_BLOCK_KEY_RE}), label stripped — for payloads whose
+ *      bizData omits the dates.
+ *   3. a block reading `…delivery: <value>` — the older global-site shape. Blocks that are ONLY the
+ *      label are skipped rather than returned, which is what produced the bare `"Delivery:"`.
+ *
+ * All of it is read off the delivery option the page has SELECTED. A listing routinely offers
+ * several, and the cheapest option's date is not the one the buyer is being shown.
  */
 function parseShipping(result: Record<string, unknown>): Shipping {
     const shipping = asRecord(result.SHIPPING);
@@ -654,33 +669,35 @@ function parseShipping(result: Record<string, unknown>): Shipping {
     } else if (Array.isArray(shipping.originalLayoutResultList)) {
         layouts = shipping.originalLayoutResultList;
     }
+    const selectedCode = shipping.selectedDeliveryOptionCode;
+    const selected = layouts.find((l) => selectedCode != null && asRecord(asRecord(l).bizData).deliveryOptionCode === selectedCode) ?? layouts[0];
+
+    // 1 — the ETA engine's own dates.
+    const bizData = asRecord(asRecord(selected).bizData);
+    const min = typeof bizData.displayEtaMinDate === 'string' ? bizData.displayEtaMinDate.trim() : '';
+    const max = typeof bizData.displayEtaMaxDate === 'string' ? bizData.displayEtaMaxDate.trim() : '';
+    if (min || max) {
+        return { deliveryTimeText: min && max && min !== max ? `${min} - ${max}` : min || max };
+    }
 
     const blocks: DeliveryBlock[] = [];
-    collectDeliveryBlocks(layouts, blocks);
+    collectDeliveryBlocks(selected ?? layouts, blocks);
 
-    // 1 — the ETA block, found by its template key rather than by its words.
-    const eta = blocks.find((b) => /^eta/i.test(b.medusaKey) && blockToText(b.content) !== '');
+    // 2 — the ETA block, found by its template key rather than by its words.
+    const eta = blocks.find((b) => ETA_BLOCK_KEY_RE.test(b.medusaKey) && blockToText(b.content) !== '');
     if (eta) {
         return { deliveryTimeText: stripEtaLabel(blockToText(eta.content)) };
     }
 
-    // 2 — legacy English shape.
-    const english = blocks.find((b) => /delivery:/i.test(b.content));
-    if (english) {
-        const text = blockToText(english.content);
-        return { deliveryTimeText: text.replace(/^.*delivery:\s*/i, '').trim() || text };
-    }
-
-    // 3 — the structured dates behind the layout.
-    for (const layout of layouts) {
-        const bizData = asRecord(asRecord(layout).bizData);
-        const min = typeof bizData.displayEtaMinDate === 'string' ? bizData.displayEtaMinDate.trim() : '';
-        const max = typeof bizData.displayEtaMaxDate === 'string' ? bizData.displayEtaMaxDate.trim() : '';
-        if (min && max) {
-            return { deliveryTimeText: min === max ? min : `${min} - ${max}` };
+    // 3 — legacy English shape. A block holding nothing but the label carries no estimate, so it
+    // must not end the search the way it used to.
+    for (const block of blocks) {
+        if (!/delivery:/i.test(block.content)) {
+            continue;
         }
-        if (min || max) {
-            return { deliveryTimeText: min || max };
+        const value = blockToText(block.content).replace(/^.*delivery:\s*/i, '').trim();
+        if (value !== '') {
+            return { deliveryTimeText: value };
         }
     }
 

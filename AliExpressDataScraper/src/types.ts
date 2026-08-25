@@ -119,7 +119,7 @@ export interface Stock {
 }
 
 export interface Shipping {
-    /** Delivery estimate exactly as the storefront shows it ("Sep 02 - 10", "antes del 28 de AGO."). */
+    /** Delivery estimate for the selected shipping option, in the storefront's own wording ("Aug. 31 - Sep. 08"). */
     deliveryTimeText: string | null;
 }
 
