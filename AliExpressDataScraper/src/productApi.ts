@@ -585,10 +585,66 @@ function parseStock(result: Record<string, unknown>): Stock {
     };
 }
 
+/** One renderable entry of a delivery layout: HTML text plus the key that says what it is. */
+interface DeliveryBlock {
+    content: string;
+    /** AliExpress's own id for the block's template, e.g. `eta_content_Local_Plus_2`. */
+    medusaKey: string;
+}
+
+/** Flatten a delivery layout tree into its `content` blocks (title, freight, addition, …). */
+function collectDeliveryBlocks(node: unknown, out: DeliveryBlock[]): void {
+    if (node == null || out.length >= 50) {
+        return;
+    }
+    if (Array.isArray(node)) {
+        node.forEach((child) => collectDeliveryBlocks(child, out));
+        return;
+    }
+    if (typeof node !== 'object') {
+        return;
+    }
+    const r = node as Record<string, unknown>;
+    if (typeof r.content === 'string') {
+        out.push({ content: r.content, medusaKey: typeof r.medusaKey === 'string' ? r.medusaKey : '' });
+    }
+    for (const key of Object.keys(r)) {
+        collectDeliveryBlocks(r[key], out);
+    }
+}
+
+/** Strip tags/entities from one layout block and collapse it to a single line. */
+function blockToText(content: string): string {
+    return decodeEntities(content.replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
+}
+
 /**
- * Shipping — the delivery estimate. It lives as HTML inside a layout `content` field, e.g.
- * `<strong>Delivery: Jul 02 - 09</strong>`. We walk the delivery layout, find the entry mentioning
- * "Delivery:", strip tags, and return the date range after the prefix.
+ * Drop a short leading `<label>:` from an ETA line, keeping the estimate itself.
+ *
+ * "Delivery: Jul 02 - 09" → "Jul 02 - 09"; "Entrega estimada: antes del viernes 28 de AGO." →
+ * "antes del viernes 28 de AGO.". The 40-char ceiling keeps a colon that is part of the estimate
+ * (or a sentence) from swallowing the value.
+ */
+function stripEtaLabel(text: string): string {
+    const stripped = text.replace(/^[^:]{1,40}:\s*/, '').trim();
+    return stripped || text;
+}
+
+/**
+ * Shipping — the delivery estimate shown under the buy box, in three tiers.
+ *
+ * The estimate is a LOCALIZED string: `Delivery: Sep 02 - 10` on the global site but
+ * `Entrega estimada: antes del viernes 28 de AGO.` on `es.aliexpress.com`, `Livraison…` on the
+ * French one, and so on. Matching the English word "delivery" therefore found nothing on every
+ * non-English storefront — which is why ES runs recorded a null here. We locate the block
+ * structurally instead, and only fall back to language:
+ *
+ *   1. `medusaKey` starting with `eta` — AliExpress's own id for the ETA block, identical in every
+ *      locale (`eta_content_Local_Plus_2` in the ES payload).
+ *   2. a block whose text still reads `…delivery: <value>` — the older global-site shape, kept so
+ *      payloads that carry no medusaKey keep working.
+ *   3. `bizData.displayEtaMinDate`/`displayEtaMaxDate` — the pre-rendered dates the layout is built
+ *      from. Localized too, but present even when the HTML block is absent.
  */
 function parseShipping(result: Record<string, unknown>): Shipping {
     const shipping = asRecord(result.SHIPPING);
@@ -599,25 +655,36 @@ function parseShipping(result: Record<string, unknown>): Shipping {
         layouts = shipping.originalLayoutResultList;
     }
 
-    let text: string | null = null;
-    const walk = (node: unknown): void => {
-        if (text || node == null) return;
-        if (Array.isArray(node)) {
-            node.forEach(walk);
-            return;
+    const blocks: DeliveryBlock[] = [];
+    collectDeliveryBlocks(layouts, blocks);
+
+    // 1 — the ETA block, found by its template key rather than by its words.
+    const eta = blocks.find((b) => /^eta/i.test(b.medusaKey) && blockToText(b.content) !== '');
+    if (eta) {
+        return { deliveryTimeText: stripEtaLabel(blockToText(eta.content)) };
+    }
+
+    // 2 — legacy English shape.
+    const english = blocks.find((b) => /delivery:/i.test(b.content));
+    if (english) {
+        const text = blockToText(english.content);
+        return { deliveryTimeText: text.replace(/^.*delivery:\s*/i, '').trim() || text };
+    }
+
+    // 3 — the structured dates behind the layout.
+    for (const layout of layouts) {
+        const bizData = asRecord(asRecord(layout).bizData);
+        const min = typeof bizData.displayEtaMinDate === 'string' ? bizData.displayEtaMinDate.trim() : '';
+        const max = typeof bizData.displayEtaMaxDate === 'string' ? bizData.displayEtaMaxDate.trim() : '';
+        if (min && max) {
+            return { deliveryTimeText: min === max ? min : `${min} - ${max}` };
         }
-        if (typeof node === 'object') {
-            const r = node as Record<string, unknown>;
-            if (typeof r.content === 'string' && /delivery:/i.test(r.content)) {
-                const stripped = r.content.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
-                text = stripped.replace(/^.*delivery:\s*/i, '').trim() || stripped;
-                return;
-            }
-            for (const key of Object.keys(r)) walk(r[key]);
+        if (min || max) {
+            return { deliveryTimeText: min || max };
         }
-    };
-    walk(layouts);
-    return { deliveryTimeText: text };
+    }
+
+    return { deliveryTimeText: null };
 }
 
 /** Overall rating + review count from PC_RATING (fallback for the reviews API). */

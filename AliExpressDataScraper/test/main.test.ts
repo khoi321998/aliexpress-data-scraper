@@ -192,6 +192,53 @@ describe('pdp.pc.query parsing', () => {
         ]);
     });
 
+    // --- shipping ETA (see parseShipping) -------------------------------------------------------
+    // The ETA is localized: es.aliexpress.com says "Entrega estimada:", never "Delivery:". Matching
+    // the English word left every non-English storefront with a null, so the block is found by its
+    // template key (`medusaKey` starting `eta`) instead.
+    it('reads the delivery estimate from a non-English storefront', () => {
+        const p = parsePdpResult({
+            SHIPPING: {
+                deliveryLayoutInfo: [
+                    {
+                        additionLayout: [{ medusaKey: 'tracking_unavailable@others', content: 'Seguimiento no disponible' }],
+                        bizData: { displayEtaMinDate: '28 de AGO.', displayEtaMaxDate: '28 de AGO.' },
+                        contentLayout: [
+                            [
+                                {
+                                    medusaKey: 'eta_content_Local_Plus_2',
+                                    content: '<span style="color: #2ABD05;"><strong>Entrega estimada: antes del viernes 28 de AGO.</strong></span>',
+                                },
+                            ],
+                        ],
+                        titleLayout: [[{ medusaKey: 'Global_Version_freeshipping@freightCost', content: '<strong>Envío gratis</strong>' }]],
+                    },
+                ],
+            },
+        });
+        expect(p.shipping.deliveryTimeText).toBe('antes del viernes 28 de AGO.');
+    });
+
+    // Last resort: the layout carries no ETA block at all, but bizData still holds the dates it
+    // would have been rendered from.
+    it('falls back to the bizData ETA dates when no ETA block is present', () => {
+        const p = parsePdpResult({
+            SHIPPING: {
+                deliveryLayoutInfo: [
+                    {
+                        bizData: { displayEtaMinDate: 'Sep 02', displayEtaMaxDate: 'Sep 09' },
+                        titleLayout: [[{ medusaKey: 'Global_Version_freeshipping@freightCost', content: '<strong>Free shipping</strong>' }]],
+                    },
+                ],
+            },
+        });
+        expect(p.shipping.deliveryTimeText).toBe('Sep 02 - Sep 09');
+    });
+
+    it('returns null when the payload carries no delivery information', () => {
+        expect(parsePdpResult({ SHIPPING: { deliveryLayoutInfo: [] } }).shipping.deliveryTimeText).toBeNull();
+    });
+
     // --- currency priority ladder (see parseCurrencyCode) ---------------------------------------
     // Rung 1 must stay ahead of everything: listings that already resolved from the selected SKU
     // keep resolving from it, even when a variant disagrees.

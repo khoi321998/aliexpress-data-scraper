@@ -105,7 +105,7 @@ export const PRODUCT_CHECKS: FieldCheck[] = [
     {
         path: 'product.shipping.deliveryTimeText',
         severity: 'warning',
-        source: 'pdp.pc.query → SHIPPING.deliveryLayoutInfo[…].content matching /delivery:/',
+        source: 'pdp.pc.query → SHIPPING.deliveryLayoutInfo[…] ETA block (medusaKey ^eta) | .bizData.displayEta{Min,Max}Date',
     },
     { path: 'product.description.html', severity: 'warning', source: 'pdp.pc.query → DESC.pcDescUrl (HTML fetched from that URL)' },
     { path: 'sellerRef.name', severity: 'warning', source: 'pdp.pc.query → SHOP_CARD_PC.storeName' },
