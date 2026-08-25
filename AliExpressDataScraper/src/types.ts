@@ -16,6 +16,11 @@ export interface ProductSellerResponse {
     url: string;
     /** ISO-8601 timestamp of when the page was captured. */
     capturedAt: string;
+    /**
+     * The Apify run that produced this record, or `null` when the scraper ran outside the platform
+     * (local `apify run`, tests). Lets a consumer trace any dataset item back to its run.
+     */
+    actorRunId: string | null;
     captureMode: CaptureMode;
     /** The ship-to country this URL was read under (ISO-3166 alpha-2). */
     shipToCountry: string;

@@ -1,3 +1,4 @@
+import { currentActorRunId } from './actorRun.js';
 import { emptyExtractionReport } from './extractionAudit.js';
 import type { Product, ProductSellerResponse, Technical } from './types.js';
 import { extractAliExpressItemId } from './url.js';
@@ -62,6 +63,7 @@ export function createAliExpressResponse(url: string): ProductSellerResponse & {
         platform: 'aliexpress',
         url,
         capturedAt: new Date().toISOString(),
+        actorRunId: currentActorRunId(),
         captureMode: 'product_only',
         // Overwritten by `extractProduct` once the ship-to and storefront for this request resolve.
         shipToCountry: '',
@@ -125,6 +127,7 @@ export function createSellerOnlyResponse(storeUrl: string, storeId: string): Pro
         platform: 'aliexpress',
         url: storeUrl,
         capturedAt: new Date().toISOString(),
+        actorRunId: currentActorRunId(),
         captureMode: 'seller_only',
         // This pipeline reads a store page directly, with no ship-to region and no storefront switch.
         shipToCountry: '',

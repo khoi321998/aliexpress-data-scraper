@@ -5,6 +5,7 @@ import { PlaywrightCrawler } from '@crawlee/playwright';
 // Apify SDK - toolkit for building Apify Actors (Read more at https://docs.apify.com/sdk/js/)
 import { Actor, log } from 'apify';
 
+import { currentActorRunId } from './actorRun.js';
 import type { ScraperInput } from './config.js';
 // this is an ESM project, so relative imports must include the `.js` extension even from TS.
 import { buildConfig, proxyGroupsFor, resolveShipToCountry, storefrontForRequest } from './config.js';
@@ -27,6 +28,10 @@ try {
 
 // Every Actor must call init() so the Apify-provided environment (storage, proxy, events) wires up.
 await Actor.init();
+
+// Logged once, right after init: every dataset record carries this id, so a run in the Console and
+// the rows it produced can be lined up from the very first log line.
+log.info(`Actor run ID: ${currentActorRunId() ?? '(none — running locally)'}`);
 
 const input = (await Actor.getInput<ScraperInput>()) ?? ({} as ScraperInput);
 const config = buildConfig(input);
